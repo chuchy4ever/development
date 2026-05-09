@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { Run } from "@ceo/shared";
 import { api, streamRunEvents } from "../api";
+import { t, useLang } from "../i18n";
 
 interface Props {
   runId: string;
@@ -18,14 +19,10 @@ interface UiEvent {
 /** Event filter buckets — broad categories the user can show/hide. */
 type FilterKey = "director" | "tools" | "phases" | "system" | "errors" | "diffs";
 
-const FILTER_LABELS: Record<FilterKey, string> = {
-  director: "🎬 Director",
-  tools: "🔧 Tools",
-  phases: "▶ Phases",
-  system: "ℹ System",
-  errors: "❗ Errors",
-  diffs: "📝 Diffs",
-};
+function filterLabel(k: FilterKey): string {
+  const icon = { director: "🎬", tools: "🔧", phases: "▶", system: "ℹ", errors: "❗", diffs: "📝" }[k];
+  return `${icon} ${t(`filter.${k}`)}`;
+}
 
 function classifyEvent(type: string): FilterKey | null {
   if (type.startsWith("director_")) return "director";
@@ -38,6 +35,7 @@ function classifyEvent(type: string): FilterKey | null {
 }
 
 export function RunView({ runId, onClose }: Props) {
+  useLang();
   const [run, setRun] = useState<Run | null>(null);
   const [events, setEvents] = useState<UiEvent[]>([]);
   const [activeTab, setActiveTab] = useState<"log" | "diff">("log");
@@ -171,20 +169,20 @@ export function RunView({ runId, onClose }: Props) {
       >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
           <div>
-            <h3 style={{ margin: 0 }}>Run {runId.slice(0, 8)}</h3>
+            <h3 style={{ margin: 0 }}>{t("run.title", { id: runId.slice(0, 8) })}</h3>
             <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 4 }}>
               {run ? (
                 <>
-                  <span style={{ marginRight: 12 }}>status: <b>{run.status}</b></span>
-                  <span style={{ marginRight: 12 }}>branch: <code>{run.branch}</code></span>
-                  {run.exit_code != null && <span style={{ marginRight: 12 }}>exit: {run.exit_code}</span>}
+                  <span style={{ marginRight: 12 }}>{t("common.status")}: <b>{run.status}</b></span>
+                  <span style={{ marginRight: 12 }}>{t("common.branch")}: <code>{run.branch}</code></span>
+                  {run.exit_code != null && <span style={{ marginRight: 12 }}>{t("common.exit")}: {run.exit_code}</span>}
                   {typeof run.total_cost_usd === "number" && (
                     <span style={{ marginRight: 12 }}>
-                      cost: <b style={{ color: "var(--yellow)" }}>${run.total_cost_usd.toFixed(4)}</b>
+                      {t("common.cost")}: <b style={{ color: "var(--yellow)" }}>${run.total_cost_usd.toFixed(4)}</b>
                     </span>
                   )}
                 </>
-              ) : "loading..."}
+              ) : t("common.loading")}
             </div>
             {run?.error && (
               <div style={{
@@ -197,22 +195,22 @@ export function RunView({ runId, onClose }: Props) {
                 fontSize: 12,
                 maxWidth: 700,
               }}>
-                <b>Failure reason:</b> {run.error}
+                <b>{t("run.failure_reason")}</b> {run.error}
               </div>
             )}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             {isRunning && (
               <button className="danger" onClick={handleCancel} disabled={actionBusy}>
-                Cancel
+                {t("btn.cancel_run")}
               </button>
             )}
             {canPr && (
               <button className="primary" onClick={handleOpenPr} disabled={actionBusy}>
-                {actionBusy ? "..." : "Open PR"}
+                {actionBusy ? "..." : t("btn.open_pr")}
               </button>
             )}
-            <button onClick={onClose}>Close</button>
+            <button onClick={onClose}>{t("common.close")}</button>
           </div>
         </div>
         {actionMsg && (
@@ -239,7 +237,7 @@ export function RunView({ runId, onClose }: Props) {
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
               <span style={{ fontSize: 18 }}>⏸</span>
-              <b>Awaiting your approval</b>
+              <b>{t("run.awaiting_approval")}</b>
               {approvalPhaseId && (
                 <code style={{ fontSize: 11, color: "var(--text-dim)" }}>phase: {approvalPhaseId}</code>
               )}
@@ -265,10 +263,10 @@ export function RunView({ runId, onClose }: Props) {
             />
             <div style={{ display: "flex", gap: 8 }}>
               <button className="primary" onClick={handleApprove} disabled={actionBusy}>
-                {actionBusy ? "..." : "✓ Approve & continue"}
+                {actionBusy ? "..." : `✓ ${t("btn.approve")}`}
               </button>
               <button className="danger" onClick={handleReject} disabled={actionBusy}>
-                ✗ Reject
+                ✗ {t("btn.reject")}
               </button>
             </div>
           </div>
@@ -281,13 +279,13 @@ export function RunView({ runId, onClose }: Props) {
             className={`tab ${activeTab === "log" ? "active" : ""}`}
             onClick={() => setActiveTab("log")}
           >
-            Live log ({events.length})
+            {t("run.live_log", { count: events.length })}
           </div>
           <div
             className={`tab ${activeTab === "diff" ? "active" : ""}`}
             onClick={() => setActiveTab("diff")}
           >
-            Diff ({diffs.length})
+            {t("run.diff", { count: diffs.length })}
           </div>
           <div style={{ flex: 1 }} />
           {activeTab === "log" && events.length > 0 && (
@@ -304,7 +302,7 @@ export function RunView({ runId, onClose }: Props) {
               title="Download all events as JSON for debug"
               style={{ marginRight: 8, alignSelf: "center", fontSize: 11 }}
             >
-              ⬇ Export log
+              ⬇ {t("btn.export_log")}
             </button>
           )}
         </div>
@@ -357,7 +355,7 @@ function LogView({ events }: { events: UiEvent[] }) {
         borderBottom: "1px solid var(--border)",
         marginBottom: 6,
       }}>
-        {(Object.keys(FILTER_LABELS) as FilterKey[]).map((k) => (
+        {(["director","tools","phases","system","errors","diffs"] as FilterKey[]).map((k) => (
           <button
             key={k}
             onClick={() => setFilters((f) => ({ ...f, [k]: !f[k] }))}
@@ -370,18 +368,18 @@ function LogView({ events }: { events: UiEvent[] }) {
             }}
             disabled={counts[k] === 0}
           >
-            {FILTER_LABELS[k]} <span style={{ opacity: 0.7 }}>· {counts[k]}</span>
+            {filterLabel(k)} <span style={{ opacity: 0.7 }}>· {counts[k]}</span>
           </button>
         ))}
         <span style={{ flex: 1 }} />
         <button
           onClick={() => setFilters({ director: true, tools: true, phases: true, system: true, errors: true, diffs: true })}
           style={{ fontSize: 11 }}
-        >show all</button>
+        >{t("common.show_all")}</button>
       </div>
       {filtered.length === 0 && (
         <div style={{ color: "var(--text-dim)", padding: 20, textAlign: "center" }}>
-          No events match the active filters.
+          {t("run.no_match")}
         </div>
       )}
       {filtered.map((ev) => (
@@ -462,7 +460,7 @@ function TeamFlowHeader({ events }: { events: UiEvent[] }) {
       border: "1px solid var(--border)", borderRadius: 8,
       background: "var(--bg-elev)",
     }}>
-      <span style={{ fontSize: 11, color: "var(--text-dim)", marginRight: 4 }}>FLOW:</span>
+      <span style={{ fontSize: 11, color: "var(--text-dim)", marginRight: 4 }}>{t("run.flow")}</span>
       {steps.map((s, i) => {
         const c = colorFor(s);
         const okBadge = s.ok === true ? "✓" : s.ok === false ? "✗" : s.inProgress ? "⏳" : "";
@@ -716,7 +714,7 @@ function summarizeInput(input: any): string {
 
 function DiffView({ diffs }: { diffs: UiEvent[] }) {
   if (diffs.length === 0) {
-    return <div style={{ color: "var(--text-dim)", padding: 20 }}>No diff yet.</div>;
+    return <div style={{ color: "var(--text-dim)", padding: 20 }}>{t("run.no_diff")}</div>;
   }
   return (
     <div>

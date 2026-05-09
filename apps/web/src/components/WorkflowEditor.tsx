@@ -36,6 +36,7 @@ import {
 } from "@ceo/shared";
 import { api } from "../api";
 import { AgentsView } from "./AgentsView";
+import { t, useLang } from "../i18n";
 import { CodeEditorModal } from "./CodeEditorModal";
 
 interface Props {
@@ -782,15 +783,14 @@ function NamedPlaybooksPanel({
           textAlign: "left", fontSize: 13,
         }}
       >
-        <span><b>Named Playbooks</b> <span style={{ color: "var(--text-dim)" }}>· {playbooks.length} recipe{playbooks.length === 1 ? "" : "s"} Director can pick from</span></span>
+        <span><b>{t("section.playbooks.title")}</b> <span style={{ color: "var(--text-dim)" }}>· {t(playbooks.length === 1 ? "section.playbooks.summary_one" : "section.playbooks.summary_many", { count: playbooks.length })}</span></span>
         <span style={{ color: "var(--text-dim)" }}>{open ? "▾" : "▸"}</span>
       </button>
       {open && (
         <div style={{ padding: "0 14px 12px", borderTop: "1px solid var(--border)" }}>
           {playbooks.length === 0 && (
             <div style={{ color: "var(--text-dim)", padding: "12px 0" }}>
-              No named Playbooks yet. Director composes ad-hoc dispatches from the skill/gate library.
-              Add a Playbook for a known-good recipe (e.g. "small_change", "feature", "bug_fix").
+              {t("section.playbooks.empty")}
             </div>
           )}
           {playbooks.map((pb, idx) => (
@@ -856,7 +856,7 @@ function NamedPlaybooksPanel({
                   if (pb2 && phases[0]) pb2.steps.push({ phase_id: phases[0].id });
                 })}
                 disabled={phases.length === 0}
-              >+ step</button>
+              >+ {t("btn.add_step")}</button>
             </div>
           ))}
           <button
@@ -865,7 +865,7 @@ function NamedPlaybooksPanel({
               if (!next.playbooks) next.playbooks = [];
               next.playbooks.push({ name: `recipe_${next.playbooks.length + 1}`, description: "", steps: [] });
             })}
-          >+ Named Playbook</button>
+          >+ {t("btn.add_playbook")}</button>
         </div>
       )}
     </div>
@@ -892,8 +892,8 @@ function SpecialistsSection({
     <CollapsibleSection
       open={open}
       onToggle={() => setOpen((o) => !o)}
-      title="Specialists"
-      summary={`${project.agents.length} agent definition${project.agents.length === 1 ? "" : "s"} (prompts, models, tools)`}
+      title={t("section.specialists.title")}
+      summary={t(project.agents.length === 1 ? "section.specialists.summary_one" : "section.specialists.summary_many", { count: project.agents.length })}
       icon="🧠"
     >
       <div style={{ paddingTop: 8 }}>
@@ -939,8 +939,8 @@ function SkillsPanel({
     <CollapsibleSection
       open={open}
       onToggle={() => setOpen((o) => !o)}
-      title="Skills"
-      summary={`${skills.length} AI specialist${skills.length === 1 ? "" : "s"} Director can dispatch`}
+      title={t("section.skills.title")}
+      summary={t(skills.length === 1 ? "section.skills.summary_one" : "section.skills.summary_many", { count: skills.length })}
       icon="🧑‍💻"
     >
       {SKILL_CATEGORY_ORDER.map((cat) => {
@@ -976,7 +976,7 @@ function SkillsPanel({
           </div>
         );
       })}
-      <button onClick={onAdd} style={{ marginTop: 10 }}>+ Add skill</button>
+      <button onClick={onAdd} style={{ marginTop: 10 }}>+ {t("btn.add_skill")}</button>
     </CollapsibleSection>
   );
 }
@@ -1002,13 +1002,13 @@ function GatesPanel({
     <CollapsibleSection
       open={open}
       onToggle={() => setOpen((o) => !o)}
-      title="Gates"
-      summary={`${gates.length} deterministic check${gates.length === 1 ? "" : "s"} (CI, lint, deploy, approval)`}
+      title={t("section.gates.title")}
+      summary={t(gates.length === 1 ? "section.gates.summary_one" : "section.gates.summary_many", { count: gates.length })}
       icon="🛡"
     >
       {gates.length === 0 && (
         <div style={{ color: "var(--text-dim)", padding: "8px 0" }}>
-          No gates yet. Add ci_gate (composer ci), lint, deploy, or human approval.
+          {t("section.gates.empty")}
         </div>
       )}
       {gates.map((p) => {
@@ -1039,7 +1039,7 @@ function GatesPanel({
         );
       })}
       <div style={{ position: "relative", marginTop: 10 }}>
-        <button onClick={() => setAddOpen((o) => !o)}>+ Add gate</button>
+        <button onClick={() => setAddOpen((o) => !o)}>+ {t("btn.add_gate")}</button>
         {addOpen && (
           <div className="wf-popover" style={{ position: "absolute", top: "100%", left: 0, marginTop: 4, zIndex: 10 }}>
             {Object.entries(TASK_TYPES).map(([key, meta]) => (
@@ -1081,13 +1081,13 @@ function TeamsPanel({
     <CollapsibleSection
       open={open}
       onToggle={() => setOpen((o) => !o)}
-      title="Teams"
-      summary={`${teams.length} capability group${teams.length === 1 ? "" : "s"} of agents (devops / dev / review / security…)`}
+      title={t("section.teams.title")}
+      summary={t(teams.length === 1 ? "section.teams.summary_one" : "section.teams.summary_many", { count: teams.length })}
       icon="👥"
     >
       {teams.length === 0 && (
         <div style={{ color: "var(--text-dim)", padding: "8px 0" }}>
-          No teams configured. Director treats agents individually. Add teams to give Director a clearer "who handles what" map.
+          {t("section.teams.empty")}
         </div>
       )}
       {teams.map((t, idx) => (
@@ -1157,7 +1157,7 @@ function TeamsPanel({
           const id = `team_${next.teams.length + 1}`;
           next.teams.push({ id, name: `Team ${next.teams.length + 1}`, agent_names: [] });
         })}
-      >+ Team</button>
+      >+ {t("btn.add_team")}</button>
     </CollapsibleSection>
   );
 }
@@ -1315,6 +1315,7 @@ function WorkflowFloatingToolbar(props: ToolbarProps) {
 }
 
 export function WorkflowEditor({ project, tickets, onChanged }: Props) {
+  useLang(); // re-render on language change
   const [wf, setWf] = useState<WorkflowDefinition | null>(null);
   const [nodes, setNodes] = useState<Node<PhaseNodeData>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
@@ -1624,10 +1625,8 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
       }}>
         <span style={{ fontSize: 16 }}>🎬</span>
         <span>
-          <b style={{ color: "#7c3aed" }}>Director orchestrates this playbook.</b>{" "}
-          You design the library of <b>skills</b> (AI steps) and <b>gates</b> (deterministic checks);
-          Director picks which to run, in what order, based on the ticket.
-          Solid arrows are escalation rules Director respects; dotted arrows are common follow-ups (advisory).
+          <b style={{ color: "#7c3aed" }}>{t("banner.director_orchestrates")}</b>{" "}
+          {t("banner.director_explains")}
         </span>
       </div>
       <SpecialistsSection project={project} onChanged={onChanged} />
@@ -1656,18 +1655,18 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
 
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4, flexWrap: "wrap" }}>
         <button onClick={save} disabled={busy || !dirty} className={dirty ? "primary" : ""}>
-          {busy ? "Saving…" : dirty ? "Save changes" : "Saved"}
+          {busy ? t("common.saving") : dirty ? t("common.dirty") : t("common.saved")}
         </button>
-        <button onClick={() => setShowTemplates(true)} disabled={busy}>Apply template</button>
-        <button onClick={() => setShowSaveTemplate(true)} disabled={busy}>Save as template</button>
-        <button onClick={reset} disabled={busy}>Reset to default</button>
+        <button onClick={() => setShowTemplates(true)} disabled={busy}>{t("btn.apply_template")}</button>
+        <button onClick={() => setShowSaveTemplate(true)} disabled={busy}>{t("btn.save_as_template")}</button>
+        <button onClick={reset} disabled={busy}>{t("btn.reset_default")}</button>
         <label style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-dim)", display: "flex", alignItems: "center", gap: 4 }}>
           <input
             type="checkbox"
             checked={showLegacyGraph}
             onChange={(e) => setShowLegacyGraph(e.target.checked)}
           />
-          show legacy graph (advanced)
+          {t("common.show_legacy_graph")}
         </label>
         {info && <span style={{ fontSize: 11, color: "var(--green)" }}>{info}</span>}
         {err && <span style={{ fontSize: 11, color: "var(--red)" }}>{err}</span>}
@@ -1767,9 +1766,9 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
       )}
 
       <div className="settings-section" style={{ marginBottom: 0 }}>
-        <h3>Project specifics for this playbook</h3>
+        <h3>{t("settings.project_specifics")}</h3>
         <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 6 }}>
-          Markdown injected into <em>every</em> agent's prompt during runs of this project.
+          {t("settings.project_specifics_hint")}
         </div>
         <textarea
           value={wf.project_specifics ?? ""}

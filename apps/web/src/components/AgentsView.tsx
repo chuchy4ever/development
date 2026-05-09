@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Agent, AgentRole, AgentTemplate, ProjectWithRepos } from "@ceo/shared";
 import { api } from "../api";
+import { t, useLang } from "../i18n";
 
 interface Props {
   project: ProjectWithRepos;
@@ -16,6 +17,7 @@ const ROLE_COLOR: Record<AgentRole, string> = {
 };
 
 export function AgentsView({ project, onChanged }: Props) {
+  useLang();
   const [agents, setAgents] = useState<Agent[]>(project.agents);
   const [templates, setTemplates] = useState<AgentTemplate[]>([]);
   const [editing, setEditing] = useState<Agent | null>(null);
@@ -92,10 +94,10 @@ export function AgentsView({ project, onChanged }: Props) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={() => setShowTemplates(true)} disabled={busy}>
-            Add from template…
+            {t("btn.add_from_template")}
           </button>
           <button className="primary" onClick={() => setCreating(true)} disabled={busy}>
-            + New specialist
+            + {t("btn.add_specialist")}
           </button>
         </div>
       </div>

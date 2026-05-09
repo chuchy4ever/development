@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { ActiveRunSummary, ProjectWithRepos, Ticket } from "@ceo/shared";
 import { SKILL_CATEGORY_LABEL, SKILL_CATEGORY_ORDER } from "@ceo/shared";
 import { api } from "../api";
+import { t, useLang } from "../i18n";
 import type { Route, Tab } from "../router";
 import { Kanban } from "./Kanban";
 import { ProjectSettings } from "./ProjectSettings";
@@ -22,6 +23,7 @@ interface Props {
 }
 
 export function ProjectView({ project, route, navigate, onChanged, onDeleted }: Props) {
+  useLang(); // re-render on language change
   const tab = route.tab;
   const setTab = (t: Tab) => navigate({ tab: t, ticketId: null });
   const [tickets, setTickets] = useState<Ticket[]>([]);
@@ -91,16 +93,16 @@ export function ProjectView({ project, route, navigate, onChanged, onDeleted }: 
       </div>
       <div className="tabs">
         <div className={`tab ${tab === "board" ? "active" : ""}`} onClick={() => setTab("board")}>
-          Board
+          {t("tab.board")}
         </div>
         <div className={`tab ${tab === "workflow" ? "active" : ""}`} onClick={() => setTab("workflow")}>
-          Playbook
+          {t("tab.playbook")}
         </div>
         <div className={`tab ${tab === "memory" ? "active" : ""}`} onClick={() => setTab("memory")}>
-          Memory
+          {t("tab.memory")}
         </div>
         <div className={`tab ${tab === "settings" ? "active" : ""}`} onClick={() => setTab("settings")}>
-          Settings
+          {t("tab.settings")}
         </div>
         <div style={{ flex: 1 }} />
         {tab === "board" && (
@@ -108,7 +110,7 @@ export function ProjectView({ project, route, navigate, onChanged, onDeleted }: 
             style={{ marginRight: 12, alignSelf: "center" }}
             onClick={() => setShowBulk(true)}
           >
-            Bulk import
+            {t("board.bulk_import")}
           </button>
         )}
       </div>
@@ -234,7 +236,7 @@ function TeamBoards({
               </span>
             </div>
             {!isActive && (
-              <div style={{ color: "var(--text-dim)", fontSize: 11, fontStyle: "italic" }}>idle</div>
+              <div style={{ color: "var(--text-dim)", fontSize: 11, fontStyle: "italic" }}>{t("common.idle")}</div>
             )}
             {runs.map((r) => {
               const ticket = ticketById.get(r.ticket_id);
@@ -263,7 +265,7 @@ function TeamBoards({
               );
             })}
             <div style={{ marginTop: 4, fontSize: 10, color: "var(--text-dim)" }}>
-              {team.agent_names.length} member{team.agent_names.length === 1 ? "" : "s"}
+              {t(team.agent_names.length === 1 ? "teams_strip.members_one" : "teams_strip.members_many", { count: team.agent_names.length })}
             </div>
           </div>
         );

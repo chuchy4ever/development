@@ -1,4 +1,5 @@
 import type { Project } from "@ceo/shared";
+import { t, useLang } from "../i18n";
 
 interface Props {
   projects: Project[];
@@ -10,6 +11,7 @@ interface Props {
 }
 
 export function Sidebar({ projects, activeId, isAdmin, onSelect, onSelectAdmin, onCreate }: Props) {
+  const [lang, setLang] = useLang();
   return (
     <aside className="sidebar">
       <h1>ceo</h1>
@@ -53,6 +55,26 @@ export function Sidebar({ projects, activeId, isAdmin, onSelect, onSelectAdmin, 
         <button className="primary" style={{ width: "100%" }} onClick={onCreate}>
           + New project
         </button>
+        <div style={{
+          display: "flex", gap: 4, marginTop: 8,
+          fontSize: 11, justifyContent: "center",
+        }}>
+          {(["cs", "en"] as const).map((l) => (
+            <button
+              key={l}
+              onClick={() => setLang(l)}
+              style={{
+                padding: "2px 10px", fontSize: 11, borderRadius: 10,
+                background: lang === l ? "var(--accent)" : "transparent",
+                color: lang === l ? "#fff" : "var(--text-dim)",
+                border: `1px solid ${lang === l ? "var(--accent)" : "var(--border)"}`,
+              }}
+              title={t(`lang.${l}`)}
+            >
+              {l.toUpperCase()}
+            </button>
+          ))}
+        </div>
       </div>
     </aside>
   );
