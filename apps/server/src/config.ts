@@ -31,6 +31,12 @@ export const TELEGRAM_DEFAULT_PROJECT_ID = process.env.TELEGRAM_DEFAULT_PROJECT_
 /** Optional. If set and the project has a Playbook with this name, the
  *  ticket is created with triage_notes hinting Director to pick it. */
 export const TELEGRAM_DEFAULT_PLAYBOOK = process.env.TELEGRAM_DEFAULT_PLAYBOOK ?? "small_change";
+/** Optional. Output / notification chat. If set, run completion summaries
+ *  are posted here instead of replying in the original input chat. Lets the
+ *  user keep the conversational chat clean — input vs output split. Get the
+ *  numeric chat id by adding the bot to a group / channel and sending /list
+ *  there; the bot logs the chat id. */
+export const TELEGRAM_OUTPUT_CHAT_ID = process.env.TELEGRAM_OUTPUT_CHAT_ID ?? "";
 
 export function ensureDirs() {
   fs.mkdirSync(DATA_DIR, { recursive: true });

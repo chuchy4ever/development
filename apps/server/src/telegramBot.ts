@@ -32,8 +32,10 @@ import {
   TELEGRAM_ALLOWED_USER_IDS,
   TELEGRAM_DEFAULT_PROJECT_ID,
   TELEGRAM_DEFAULT_PLAYBOOK,
+  TELEGRAM_OUTPUT_CHAT_ID,
 } from "./config.js";
 import { nanoid } from "nanoid";
+import { clearHistory, handleAssistantMessage } from "./telegramAssistant.js";
 
 interface TgUpdate {
   update_id: number;
@@ -167,12 +169,17 @@ async function handleNewTicket(msg: TgMessage, raw: string): Promise<void> {
 
 async function watchRunCompletion(
   runId: string,
-  chatId: number,
+  fallbackChatId: number,
   replyTo: number,
   ticketKey: string | null,
 ): Promise<void> {
   const TERMINAL = new Set(["succeeded", "failed", "cancelled", "awaiting_approval"]);
   const deadline = Date.now() + 30 * 60 * 1000;
+  // Where to post completion: dedicated OUTPUT chat if configured (keeps the
+  // input/conversation chat clean), else fall back to the originating chat.
+  const outChatId = TELEGRAM_OUTPUT_CHAT_ID ? Number(TELEGRAM_OUTPUT_CHAT_ID) : fallbackChatId;
+  // replyTo only makes sense in the same chat as the original message.
+  const useReplyTo = outChatId === fallbackChatId ? replyTo : undefined;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 5000));
     const row = db
@@ -184,26 +191,28 @@ async function watchRunCompletion(
       const emoji = row.status === "succeeded" ? "✅" : row.status === "awaiting_approval" ? "⏸" : "❌";
       const detail = row.status === "failed" && row.error ? `\nReason: ${row.error.slice(0, 200)}` : "";
       await sendMessage(
-        chatId,
+        outChatId,
         `${emoji} *${ticketKey ?? runId.slice(0, 8)}* — ${row.status} (${cost})${detail}`,
-        replyTo,
+        useReplyTo,
       );
       return;
     }
   }
   // Timeout — post one heads-up.
-  await sendMessage(chatId, `⏱ ${ticketKey ?? runId.slice(0, 8)} still running after 30 min — check the UI.`, replyTo);
+  await sendMessage(outChatId, `⏱ ${ticketKey ?? runId.slice(0, 8)} still running after 30 min — check the UI.`, useReplyTo);
 }
 
 async function handleHelp(chatId: number, replyTo: number): Promise<void> {
   await sendMessage(chatId, [
-    "*ceo bot*",
-    "Send a plain message — first line becomes the ticket title, the rest the body.",
-    "Prefix with `@AGA` (project key) to target a specific project; default is configured server-side.",
+    "*ceo bot — chat with the CEO assistant*",
+    "Plain messages = conversation. The assistant sees current state (projects, active runs, costs) and can dispatch a ticket when you give clear instructions.",
     "",
     "Commands:",
     "  /help — this message",
-    "  /list — recent active runs",
+    "  /list — active runs",
+    "  /quick @KEY title body — skip the chat, dispatch a ticket directly",
+    "  /reset — clear the conversation history with the assistant",
+    "  /chatid — show this chat's numeric id (use it for TELEGRAM_OUTPUT_CHAT_ID)",
   ].join("\n"), replyTo);
 }
 
@@ -231,17 +240,77 @@ async function handleMessage(msg: TgMessage): Promise<void> {
   const text = msg.text?.trim() ?? "";
   if (!text) return;
   const userId = msg.from?.id;
+  // Log the chat id once so the user can find a group/channel id for
+  // TELEGRAM_OUTPUT_CHAT_ID without having to scrape the API themselves.
+  if (text === "/chatid") {
+    await sendMessage(msg.chat.id, `chat id: \`${msg.chat.id}\``, msg.message_id);
+    return;
+  }
   if (!isAllowed(userId)) {
     await sendMessage(msg.chat.id, `🚫 User ${userId ?? "?"} not in TELEGRAM_ALLOWED_USER_IDS whitelist.`, msg.message_id);
     return;
   }
   if (text.startsWith("/help") || text === "/start") return handleHelp(msg.chat.id, msg.message_id);
   if (text.startsWith("/list")) return handleList(msg.chat.id, msg.message_id);
+  if (text.startsWith("/quick ")) {
+    // Fast path: skip the assistant, go straight to ticket-and-run.
+    await handleNewTicket(msg, text.slice("/quick ".length).trim());
+    return;
+  }
+  if (text === "/reset") {
+    clearHistory(msg.chat.id);
+    await sendMessage(msg.chat.id, "🧹 Conversation history cleared.", msg.message_id);
+    return;
+  }
   if (text.startsWith("/")) {
     await sendMessage(msg.chat.id, "Unknown command. Try /help.", msg.message_id);
     return;
   }
-  await handleNewTicket(msg, text);
+  // Default: free text → CEO assistant (chat-level helper, can dispatch).
+  await handleConversation(msg, text);
+}
+
+/** Free-text path: route through the conversational assistant. The
+ *  assistant decides whether to chat back or dispatch a ticket. */
+async function handleConversation(msg: TgMessage, text: string): Promise<void> {
+  // Telegram has a 4096-char message cap; chunk if necessary.
+  const sendChunked = async (full: string) => {
+    const out = full.trim();
+    if (!out) return;
+    if (out.length <= 3500) {
+      await sendMessage(msg.chat.id, out, msg.message_id);
+      return;
+    }
+    for (let i = 0; i < out.length; i += 3500) {
+      await sendMessage(msg.chat.id, out.slice(i, i + 3500));
+    }
+  };
+
+  // Visual ack while claude thinks (~5–15s).
+  void tg("sendChatAction", { chat_id: msg.chat.id, action: "typing" });
+  let response;
+  try {
+    response = await handleAssistantMessage(msg.chat.id, text);
+  } catch (e: unknown) {
+    await sendMessage(msg.chat.id, `⚠ Assistant error: ${e instanceof Error ? e.message : String(e)}`, msg.message_id);
+    return;
+  }
+  await sendChunked(response.reply);
+  if (response.dispatch) {
+    const { ticketKey, runId } = response.dispatch;
+    await sendMessage(
+      msg.chat.id,
+      `✅ Dispatched *${ticketKey}* — run *${runId.slice(0, 8)}* started.`,
+    );
+    // Watch in the background; final summary goes to the OUTPUT chat
+    // (or this chat if no output chat is configured).
+    watchRunCompletion(runId, msg.chat.id, msg.message_id, ticketKey).catch((e) => {
+      console.error("[telegram] watchRunCompletion failed", e);
+    });
+  }
+  if (response.dispatchError) {
+    await sendMessage(msg.chat.id, `❌ Dispatch failed: ${response.dispatchError}`, msg.message_id);
+  }
 }
 
 let pollLoopRunning = false;
