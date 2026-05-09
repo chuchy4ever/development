@@ -226,7 +226,7 @@ interface FormProps {
   ) => Promise<void>;
 }
 
-function AgentForm({ mode, initial, projectId, onClose, onSubmit }: FormProps) {
+export function AgentForm({ mode, initial, projectId, onClose, onSubmit }: FormProps) {
   useEscClose(onClose);
   const [name, setName] = useState(initial?.name ?? "");
   const [role, setRole] = useState<AgentRole>(initial?.role ?? "coder");

@@ -37,9 +37,16 @@ import {
   SKILL_CATEGORY_ORDER,
 } from "@ceo/shared";
 import { api } from "../api";
-import { AgentsView } from "./AgentsView";
+import { AgentForm } from "./AgentsView";
 import { t, useLang } from "../i18n";
 import { useEscClose } from "../hooks";
+
+/** Agents that are part of the platform's internals — not user-facing
+ *  specialists Director dispatches into the playbook. Hidden from the
+ *  Skills panel so the user isn't confused by a roster that doesn't match
+ *  the playbook. They still exist in the DB and run their internal
+ *  workflows (Memory Curator updates project memory, CTO decomposes). */
+const INTERNAL_AGENT_NAMES = new Set(["Memory Curator", "CTO", "Director"]);
 import { CodeEditorModal } from "./CodeEditorModal";
 
 interface Props {
@@ -878,39 +885,6 @@ function NamedPlaybooksPanel({
 /* ─────────────────────── Stacked-panels editor (no graph) ──────────────── */
 
 /**
- * Specialists section — embeds the agent definition editor (formerly the
- * standalone "Agents" tab). Closed by default; users only need to open it
- * when adding/editing an agent's prompt or model. Day-to-day orchestration
- * happens via the Skills/Gates/Teams/Playbooks sections below.
- */
-function SpecialistsSection({
-  project,
-  onChanged,
-}: {
-  project: ProjectWithRepos;
-  onChanged?: () => Promise<void>;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <CollapsibleSection
-      open={open}
-      onToggle={() => setOpen((o) => !o)}
-      title={t("section.specialists.title")}
-      summary={t(project.agents.length === 1 ? "section.specialists.summary_one" : "section.specialists.summary_many", { count: project.agents.length })}
-      icon="🧠"
-    >
-      <div style={{ paddingTop: 8 }}>
-        <AgentsView
-          project={project}
-          onChanged={async () => { if (onChanged) await onChanged(); }}
-        />
-      </div>
-    </CollapsibleSection>
-  );
-}
-
-
-/**
  * Skills panel — agent phases as a flat list, grouped by capability category.
  * Replaces the graph canvas for skills. Each row opens the existing edit
  * modal on click. Add at the bottom.
@@ -918,16 +892,28 @@ function SpecialistsSection({
 function SkillsPanel({
   wf,
   agentsById,
+  agents,
+  projectId,
   onSelect,
   onAdd,
+  onAddNew,
+  onAgentsChanged,
 }: {
   wf: WorkflowDefinition;
   agentsById: Map<string, Agent>;
+  agents: Agent[];
+  projectId: string;
   onSelect: (phaseId: string) => void;
   onAdd: () => void;
+  onAddNew: () => void;
+  onAgentsChanged: () => Promise<void>;
 }) {
   const [open, setOpen] = useState(true);
   const skills = wf.phases.filter((p) => (p.kind === "agent" || !p.kind) && p.id !== "__director__");
+  // Orphaned agents = agents not referenced by any skill, not internal, not
+  // a built-in role default. Surfaced as a tiny cleanup affordance.
+  const usedAgentIds = new Set(skills.map((s) => s.agent_id).filter(Boolean) as string[]);
+  const orphans = agents.filter((a) => !INTERNAL_AGENT_NAMES.has(a.name) && !usedAgentIds.has(a.id));
 
   // Group by derived category
   const byCategory = new Map<SkillCategory, WorkflowPhase[]>();
@@ -979,7 +965,28 @@ function SkillsPanel({
           </div>
         );
       })}
-      <button onClick={onAdd} style={{ marginTop: 10 }}>+ {t("btn.add_skill")}</button>
+      <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }}>
+        <button onClick={onAdd}>+ {t("btn.add_skill")}</button>
+        <button onClick={onAddNew} title="Create a new specialist (agent definition) and a skill that uses it">
+          + {t("btn.add_specialist")}
+        </button>
+        {orphans.length > 0 && (
+          <button
+            onClick={async () => {
+              const names = orphans.map((a) => a.name).join(", ");
+              if (!confirm(`Delete ${orphans.length} unused agent(s)? They have no skill referencing them.\n\n${names}`)) return;
+              for (const a of orphans) {
+                try { await api.deleteAgent(projectId, a.id); } catch { /* non-fatal */ }
+              }
+              await onAgentsChanged();
+            }}
+            style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-dim)" }}
+            title={`Unused: ${orphans.map((a) => a.name).join(", ")}`}
+          >
+            🧹 Cleanup unused ({orphans.length})
+          </button>
+        )}
+      </div>
     </CollapsibleSection>
   );
 }
@@ -1599,6 +1606,12 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
   const [showTemplates, setShowTemplates] = useState(false);
   const [showSaveTemplate, setShowSaveTemplate] = useState(false);
   const [showLegacyGraph, setShowLegacyGraph] = useState(false);
+  // When set, opens the AgentForm modal in edit mode for this agent id —
+  // launched from inside the Skill modal so the user can tweak the agent's
+  // prompt/model/tools without leaving the playbook editor.
+  const [editAgentId, setEditAgentId] = useState<string | null>(null);
+  // When true, opens AgentForm in create mode for "+ New specialist & skill".
+  const [creatingNewAgent, setCreatingNewAgent] = useState(false);
   const [bannerDismissed, setBannerDismissed] = useState(() => {
     try { return localStorage.getItem("ceo.banner.director.dismissed") === "1"; } catch { return false; }
   });
@@ -1919,12 +1932,15 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
           >{t("banner.dismiss")}</button>
         </div>
       )}
-      <SpecialistsSection project={project} onChanged={onChanged} />
       <SkillsPanel
         wf={wf}
         agentsById={agentsById}
+        agents={project.agents}
+        projectId={project.id}
         onSelect={(id) => setSelectedPhaseId(id)}
         onAdd={addPhase}
+        onAddNew={() => setCreatingNewAgent(true)}
+        onAgentsChanged={async () => { if (onChanged) await onChanged(); }}
       />
       <GatesPanel
         wf={wf}
@@ -2322,17 +2338,32 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
               />
             ) : (
               <div className="form-row">
-                <label>agent</label>
-                <select
-                  value={selected.agent_id ?? ""}
-                  onChange={(e) => updatePhase(selected.id, { agent_id: e.target.value })}
-                >
-                  {project.agents.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.name} ({a.role})
-                    </option>
-                  ))}
-                </select>
+                <label>{t("skill.modal.agent")}</label>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <select
+                    value={selected.agent_id ?? ""}
+                    onChange={(e) => updatePhase(selected.id, { agent_id: e.target.value })}
+                    style={{ flex: 1 }}
+                  >
+                    {project.agents
+                      .filter((a) => !INTERNAL_AGENT_NAMES.has(a.name))
+                      .map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.name} ({a.role}{a.model ? `, ${a.model}` : ""})
+                        </option>
+                      ))}
+                  </select>
+                  {selected.agent_id && (
+                    <button
+                      type="button"
+                      onClick={() => setEditAgentId(selected.agent_id!)}
+                      title="Edit this agent's prompt / model / tools"
+                    >Edit agent</button>
+                  )}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+                  Agent = the specialist (prompt + model + tools). Skill = how this project uses it (notes / category / retry below).
+                </div>
               </div>
             )}
             {getTaskKindForPhase(selected) === null && (
@@ -2466,6 +2497,54 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
           onSaved={(t) => {
             setShowSaveTemplate(false);
             setInfo(`Saved template "${t.name}" (${t.key}).`);
+          }}
+        />
+      )}
+      {editAgentId && (() => {
+        const agent = project.agents.find((a) => a.id === editAgentId);
+        if (!agent) { setEditAgentId(null); return null; }
+        return (
+          <AgentForm
+            mode="edit"
+            initial={agent}
+            projectId={project.id}
+            onClose={() => setEditAgentId(null)}
+            onSubmit={async (input, memory) => {
+              await api.updateAgent(project.id, agent.id, input);
+              if (memory !== undefined) {
+                await api.putAgentMemory(project.id, agent.id, memory);
+              }
+              if (onChanged) await onChanged();
+              setEditAgentId(null);
+            }}
+          />
+        );
+      })()}
+      {creatingNewAgent && (
+        <AgentForm
+          mode="create"
+          projectId={project.id}
+          onClose={() => setCreatingNewAgent(false)}
+          onSubmit={async (input) => {
+            const created = await api.createAgent(project.id, input);
+            if (onChanged) await onChanged();
+            setCreatingNewAgent(false);
+            // Auto-create a skill (phase) referencing the new agent so the
+            // user lands in a coherent state — there's no point creating an
+            // agent that's not used in the playbook.
+            updateWf((next) => {
+              const id = (input.name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "")) || `skill_${next.phases.length + 1}`;
+              const xs = next.phases.map((p) => p.position?.x ?? 0).concat([0]);
+              const x = Math.max(...xs) + 240;
+              next.phases.push({
+                id: next.phases.some((p) => p.id === id) ? `${id}_${next.phases.length + 1}` : id,
+                kind: "agent",
+                agent_id: (created as Agent).id,
+                next: null,
+                position: { x, y: 240 },
+              });
+            });
+            setInfo(`Created specialist "${input.name}" + skill. Save to persist.`);
           }}
         />
       )}
