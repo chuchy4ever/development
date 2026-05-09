@@ -176,6 +176,52 @@ export interface CreateAgentInput {
   allowed_tools?: string[] | null;
 }
 
+/** Auto-derive a phase's capability category from its kind / agent name+role.
+ *  Used both by the editor (swimlane layout) and by Director (prompt grouping)
+ *  whenever phase.category is not explicitly set. */
+export function deriveSkillCategory(
+  phase: WorkflowPhase,
+  agent?: { name: string; role: AgentRole } | null,
+): SkillCategory {
+  if (phase.category) return phase.category;
+  if (phase.kind === "task" || phase.kind === "command") return "validation";
+  if (phase.kind === "approval") return "closing";
+  if (!agent) return "general";
+  // Name-based heuristics override role for specialists (a "Closer" is reviewer
+  // role but conceptually closing; "Tech Lead" / "Architect" are coders but
+  // conceptually planning; "DevOps Engineer" is infra).
+  const n = agent.name.toLowerCase();
+  if (n.includes("closer")) return "closing";
+  if (n.includes("devops")) return "infra";
+  if (n.includes("tech lead") || n.includes("architect") || n.includes("cto")) return "planning";
+  if (n.includes("lint")) return "review";
+  if (agent.role === "reviewer") return "review";
+  if (agent.role === "tester") return "validation";
+  if (agent.role === "coder") return "coding";
+  return "general";
+}
+
+/** Display order for swimlanes — top to bottom, the way work tends to flow. */
+export const SKILL_CATEGORY_ORDER: SkillCategory[] = [
+  "planning",
+  "infra",
+  "coding",
+  "review",
+  "validation",
+  "closing",
+  "general",
+];
+
+export const SKILL_CATEGORY_LABEL: Record<SkillCategory, string> = {
+  planning: "Planning",
+  coding: "Coding",
+  review: "Review",
+  validation: "Validation (gates)",
+  closing: "Closing",
+  infra: "Infra",
+  general: "General",
+};
+
 /** A pre-defined agent template the user can instantiate into a project. */
 export interface AgentTemplate {
   key: string;                  // stable identifier
@@ -251,6 +297,18 @@ export interface ApplyTemplateResult {
   phases: number;
 }
 
+/** Category groups skills/gates by what they DO, independent of execution order.
+ *  Director sees them grouped by category in its prompt; the editor lays them
+ *  out in swimlanes. Auto-derived from agent role/name when not set. */
+export type SkillCategory =
+  | "planning"   // Tech Lead, Architect — design / decompose
+  | "coding"     // Junior, Senior, Coder — write code
+  | "review"     // Reviewer, Lint Gate — assess quality
+  | "validation" // ci_gate, tests — deterministic checks (gates)
+  | "closing"    // Closer, deploy, approval — finalize
+  | "infra"      // DevOps — environment / pipeline
+  | "general";
+
 export interface WorkflowPhase {
   id: string;
   /**
@@ -261,6 +319,10 @@ export interface WorkflowPhase {
    * via API (human-in-the-loop gate).
    */
   kind?: "agent" | "task" | "command" | "approval" | "director";
+  /** Capability group (planning / coding / review / validation / closing / infra).
+   *  Director uses this to organize the playbook by what each skill does, not
+   *  the order of `next` edges. Auto-derived if absent. */
+  category?: SkillCategory;
   /** Required when kind="agent". Reference to an agent in the same project. */
   agent_id?: string;
   /** Required when kind="task". */

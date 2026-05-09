@@ -15,7 +15,9 @@ import type {
   WorkflowPhase,
   ReviewVerdict,
   DirectorConfig as SharedDirectorConfig,
+  SkillCategory,
 } from "@ceo/shared";
+import { deriveSkillCategory, SKILL_CATEGORY_ORDER, SKILL_CATEGORY_LABEL } from "@ceo/shared";
 import { runAgent, specFromAgent } from "./agents.js";
 import type { AgentContext } from "./agents.js";
 import { loadAgent } from "./store.js";
@@ -373,11 +375,11 @@ ${project.description || "(no description)"}
 
 ${cfg.project_brief ? `## Project brief\n${cfg.project_brief}\n` : ""}
 
-## Playbook (the team's reference pipeline for this project)
+## Playbook (skills + gates available, grouped by capability)
 
 ${playbook}
 
-The playbook is a STARTING POINT — the standard pipeline this team uses for tickets like this. Follow it when it fits, deviate when the ticket is small (skip steps), retry early phases when reviewer/CI bounces, parallelize when independent. You are NOT obligated to walk every node; you ARE expected to use it as a smart default and to know what each named phase means.
+The playbook is a LIBRARY of named skills and gates this team has prepared for problems in this project. It is organized by what each one does, not by step order. You decide which skills to use, in what sequence, based on the ticket. The "common follow-up" hints record what tends to come next, but you may skip, reorder, parallelize, or revisit. Always close with a Validation gate (ci_gate) before mark_done.
 
 ## Available actions
 
@@ -421,32 +423,50 @@ function renderPlaybook(project: ProjectWithRepos): string {
   const phases = (project.workflow.phases ?? []).filter((p) => p.kind !== "director");
   if (phases.length === 0) return "(no playbook phases — workflow is Director-only; you must drive entirely from the sub-agent registry)";
   const agentById = new Map(project.agents.map((a) => [a.id, a]));
-  const lines: string[] = [];
+
+  // Group phases by capability category. Director should think "what kind of
+  // help do I need" (planning / coding / review / validation / closing) rather
+  // than "what's the next edge in the graph".
+  const byCategory = new Map<SkillCategory, WorkflowPhase[]>();
   for (const p of phases) {
-    const kind = p.kind ?? "agent";
-    let head = `- **${p.id}** [${kind}]`;
-    if (kind === "agent" && p.agent_id) {
-      const a = agentById.get(p.agent_id);
-      head += a ? ` → agent "${a.name}" (${a.role}${a.model ? `, ${a.model}` : ""})` : ` → agent ${p.agent_id} (missing)`;
-    } else if (kind === "task" && p.task) {
-      head += ` → task ${p.task.type}`;
-      if (p.task.type === "shell") {
-        const cmd = String((p.task.config as Record<string, unknown>)?.command ?? "");
-        const oneliner = cmd.split("\n")[0]?.slice(0, 80) ?? "";
-        if (oneliner) head += ` (\`${oneliner}${cmd.includes("\n") ? " …" : ""}\`)`;
-      }
-    } else if (kind === "approval") {
-      head += " → human gate";
-    }
-    lines.push(head);
-    if (p.notes) lines.push(`    notes: ${p.notes.slice(0, 200)}${p.notes.length > 200 ? "…" : ""}`);
-    const flow: string[] = [];
-    if (p.next) flow.push(`next → ${p.next}`);
-    if (p.retry_target) flow.push(`on-fail → ${p.retry_target} (max ${p.max_attempts ?? 2})`);
-    if (p.routes) flow.push(`routes: ${Object.entries(p.routes).map(([k, v]) => `${k}→${v}`).join(", ")}`);
-    if (flow.length) lines.push(`    flow: ${flow.join("; ")}`);
+    const agent = p.agent_id ? agentById.get(p.agent_id) : null;
+    const cat = deriveSkillCategory(p, agent ? { name: agent.name, role: agent.role } : null);
+    if (!byCategory.has(cat)) byCategory.set(cat, []);
+    byCategory.get(cat)!.push(p);
   }
-  return lines.join("\n");
+
+  const sections: string[] = [];
+  for (const cat of SKILL_CATEGORY_ORDER) {
+    const phasesInCat = byCategory.get(cat);
+    if (!phasesInCat || phasesInCat.length === 0) continue;
+    sections.push(`### ${SKILL_CATEGORY_LABEL[cat]}`);
+    for (const p of phasesInCat) {
+      const kind = p.kind ?? "agent";
+      let head = `- **${p.id}**`;
+      if (kind === "agent" && p.agent_id) {
+        const a = agentById.get(p.agent_id);
+        head += a ? ` → ${a.name} (${a.role}${a.model ? `, ${a.model}` : ""})` : ` → agent ${p.agent_id} (missing)`;
+      } else if (kind === "task" && p.task) {
+        head += ` → ${p.task.type} gate`;
+        if (p.task.type === "shell") {
+          const cmd = String((p.task.config as Record<string, unknown>)?.command ?? "");
+          const oneliner = cmd.split("\n")[0]?.slice(0, 80) ?? "";
+          if (oneliner) head += ` (\`${oneliner}${cmd.includes("\n") ? " …" : ""}\`)`;
+        }
+      } else if (kind === "approval") {
+        head += " → human approval";
+      }
+      sections.push(head);
+      if (p.notes) sections.push(`    notes: ${p.notes.slice(0, 200)}${p.notes.length > 200 ? "…" : ""}`);
+      const flow: string[] = [];
+      if (p.next) flow.push(`common follow-up → ${p.next}`);
+      if (p.retry_target) flow.push(`on-fail escalate → ${p.retry_target} (max ${p.max_attempts ?? 2})`);
+      if (p.routes) flow.push(`routes: ${Object.entries(p.routes).map(([k, v]) => `${k}→${v}`).join(", ")}`);
+      if (flow.length) sections.push(`    ${flow.join("; ")}`);
+    }
+    sections.push("");
+  }
+  return sections.join("\n").trim();
 }
 
 function buildDirectorTurnPrompt(

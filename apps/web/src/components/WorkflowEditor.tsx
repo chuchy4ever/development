@@ -23,10 +23,16 @@ import type {
   Agent,
   AgentRole,
   ProjectWithRepos,
+  SkillCategory,
   Ticket,
   WorkflowDefinition,
   WorkflowPhase,
   WorkflowPreset,
+} from "@ceo/shared";
+import {
+  deriveSkillCategory,
+  SKILL_CATEGORY_LABEL,
+  SKILL_CATEGORY_ORDER,
 } from "@ceo/shared";
 import { api } from "../api";
 import { CodeEditorModal } from "./CodeEditorModal";
@@ -638,24 +644,36 @@ function clonePhase(p: WorkflowPhase): WorkflowPhase {
  * Phases reachable only via a `route` (i.e. fork branches like Architect)
  * are placed on a parallel lane above the main flow.
  */
-function autoArrange(wf: WorkflowDefinition): Map<string, { x: number; y: number }> {
+function autoArrange(
+  wf: WorkflowDefinition,
+  agentsById?: Map<string, Agent>,
+): Map<string, { x: number; y: number }> {
   const X_STEP = 180;
-  const X_OFFSET = 60;
-  const Y_MAIN = 240;
-  const Y_BRANCH = 80;
+  const X_OFFSET = 80;
+  const LANE_HEIGHT = 140;
+  const LANE_TOP = 60;
 
   const phaseById = new Map(wf.phases.map((p) => [p.id, p]));
 
-  // Determine which phases are "main path" — i.e. reached as someone's `next`.
-  // The entry phase is always main. Phases reached ONLY via `route` are branches.
-  const reachedAsNext = new Set<string>();
+  // Group phases by capability category — each category becomes a horizontal
+  // swimlane. Within a lane, BFS level on `next` edges drives X position.
+  const cat = (p: WorkflowPhase): SkillCategory => {
+    const a = p.agent_id ? agentsById?.get(p.agent_id) : null;
+    return deriveSkillCategory(p, a ? { name: a.name, role: a.role } : null);
+  };
+
+  const phasesByCategory = new Map<SkillCategory, WorkflowPhase[]>();
   for (const p of wf.phases) {
-    if (p.next) reachedAsNext.add(p.next);
+    if (p.kind === "director") continue; // hidden
+    const c = cat(p);
+    if (!phasesByCategory.has(c)) phasesByCategory.set(c, []);
+    phasesByCategory.get(c)!.push(p);
   }
 
-  // BFS levels.
+  // BFS over `next` from entry to compute X levels; phases not reached pile
+  // at level 0 of their lane.
   const level = new Map<string, number>();
-  const entry = wf.phases[0]?.id;
+  const entry = wf.phases.find((p) => p.kind !== "director")?.id;
   if (entry) {
     level.set(entry, 0);
     const queue = [entry];
@@ -678,37 +696,25 @@ function autoArrange(wf: WorkflowDefinition): Map<string, { x: number; y: number
   }
   for (const p of wf.phases) if (!level.has(p.id)) level.set(p.id, 0);
 
-  // Classify lane: main vs branch.
-  const isMain = (id: string) => id === entry || reachedAsNext.has(id);
-  const mainAtLevel = new Map<number, string[]>();
-  const branchAtLevel = new Map<number, string[]>();
-  for (const p of wf.phases) {
-    const lv = level.get(p.id) ?? 0;
-    const bucket = isMain(p.id) ? mainAtLevel : branchAtLevel;
-    bucket.set(lv, [...(bucket.get(lv) ?? []), p.id]);
-  }
-
   const positions = new Map<string, { x: number; y: number }>();
+  // Determine lane Y per category: only categories that have phases get a
+  // lane, in the canonical SKILL_CATEGORY_ORDER.
+  const activeCats = SKILL_CATEGORY_ORDER.filter((c) => (phasesByCategory.get(c)?.length ?? 0) > 0);
+  const laneY = new Map<SkillCategory, number>();
+  activeCats.forEach((c, i) => laneY.set(c, LANE_TOP + i * LANE_HEIGHT));
 
-  // Place main lane.
-  for (const [lv, ids] of mainAtLevel) {
-    const x = X_OFFSET + lv * X_STEP;
-    if (ids.length === 1) {
-      positions.set(ids[0]!, { x, y: Y_MAIN });
-    } else {
-      ids.forEach((id, i) => {
-        positions.set(id, { x, y: Y_MAIN + (i - (ids.length - 1) / 2) * 140 });
-      });
+  for (const [c, list] of phasesByCategory) {
+    const y = laneY.get(c) ?? LANE_TOP;
+    // Group within lane by level; if multiple phases share a level, stack them.
+    const byLevel = new Map<number, WorkflowPhase[]>();
+    for (const p of list) {
+      const lv = level.get(p.id) ?? 0;
+      byLevel.set(lv, [...(byLevel.get(lv) ?? []), p]);
     }
-  }
-  // Place branch lane (above).
-  for (const [lv, ids] of branchAtLevel) {
-    const x = X_OFFSET + lv * X_STEP;
-    if (ids.length === 1) {
-      positions.set(ids[0]!, { x, y: Y_BRANCH });
-    } else {
-      ids.forEach((id, i) => {
-        positions.set(id, { x, y: Y_BRANCH + (i - (ids.length - 1) / 2) * 100 });
+    for (const [lv, group] of byLevel) {
+      const x = X_OFFSET + lv * X_STEP;
+      group.forEach((p, i) => {
+        positions.set(p.id, { x, y: y + i * 60 });
       });
     }
   }
@@ -1158,7 +1164,7 @@ export function WorkflowEditor({ project, tickets }: Props) {
           onAddTask={addTaskPhase}
           onAddApproval={addApprovalPhase}
           onAutoArrange={() => {
-            const positions = autoArrange(wf!);
+            const positions = autoArrange(wf!, agentsById);
             updateWf((next) => {
               next.phases.forEach((p) => {
                 const pos = positions.get(p.id);
@@ -1368,6 +1374,29 @@ export function WorkflowEditor({ project, tickets }: Props) {
                 }}
               />
             </div>
+            {selected.kind !== "director" && (() => {
+              const selectedAgent = selected.agent_id ? agentsById.get(selected.agent_id) : null;
+              const derived = deriveSkillCategory(selected, selectedAgent ? { name: selectedAgent.name, role: selectedAgent.role } : null);
+              return (
+                <div className="form-row">
+                  <label>category</label>
+                  <select
+                    value={selected.category ?? ""}
+                    onChange={(e) => updatePhase(selected.id, {
+                      category: (e.target.value || undefined) as SkillCategory | undefined,
+                    })}
+                  >
+                    <option value="">auto ({SKILL_CATEGORY_LABEL[derived]})</option>
+                    {SKILL_CATEGORY_ORDER.map((c) => (
+                      <option key={c} value={c}>{SKILL_CATEGORY_LABEL[c]}</option>
+                    ))}
+                  </select>
+                  <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+                    Capability group. Director sees skills grouped by category, not by edge order. Auto-derived from agent role/name when blank.
+                  </div>
+                </div>
+              );
+            })()}
             {selected.kind === "director" ? (
               <>
                 <div className="form-row">
