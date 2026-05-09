@@ -100,19 +100,39 @@ export function ProjectView({ project, route, navigate, onChanged, onDeleted }: 
           </div>
         </div>
       </div>
-      <div className="tabs">
-        <div className={`tab ${tab === "board" ? "active" : ""}`} onClick={() => setTab("board")}>
+      <div className="tabs" role="tablist">
+        <button
+          role="tab"
+          aria-selected={tab === "board"}
+          className={`tab tab-button ${tab === "board" ? "active" : ""}`}
+          onClick={() => setTab("board")}
+        >
           {t("tab.board")}
-        </div>
-        <div className={`tab ${tab === "workflow" ? "active" : ""}`} onClick={() => setTab("workflow")}>
+        </button>
+        <button
+          role="tab"
+          aria-selected={tab === "workflow"}
+          className={`tab tab-button ${tab === "workflow" ? "active" : ""}`}
+          onClick={() => setTab("workflow")}
+        >
           {t("tab.playbook")}
-        </div>
-        <div className={`tab ${tab === "memory" ? "active" : ""}`} onClick={() => setTab("memory")}>
+        </button>
+        <button
+          role="tab"
+          aria-selected={tab === "memory"}
+          className={`tab tab-button ${tab === "memory" ? "active" : ""}`}
+          onClick={() => setTab("memory")}
+        >
           {t("tab.memory")}
-        </div>
-        <div className={`tab ${tab === "settings" ? "active" : ""}`} onClick={() => setTab("settings")}>
+        </button>
+        <button
+          role="tab"
+          aria-selected={tab === "settings"}
+          className={`tab tab-button ${tab === "settings" ? "active" : ""}`}
+          onClick={() => setTab("settings")}
+        >
           {t("tab.settings")}
-        </div>
+        </button>
         <div style={{ flex: 1 }} />
         {tab === "board" && (
           <button
@@ -260,15 +280,19 @@ function TeamBoards({
             {runs.map((r) => {
               const ticket = ticketById.get(r.ticket_id);
               return (
-                <div
+                <button
                   key={r.run_id}
+                  type="button"
                   onClick={() => ticket && onCardClick(ticket)}
+                  disabled={!ticket}
                   style={{
                     fontSize: 11, padding: "4px 6px", marginBottom: 4,
                     background: "var(--bg)", borderRadius: 4,
                     border: "1px solid var(--border)",
-                    cursor: "pointer",
+                    cursor: ticket ? "pointer" : "default",
                     display: "flex", alignItems: "center", gap: 6,
+                    width: "100%", textAlign: "left",
+                    font: "inherit", color: "inherit",
                   }}
                   title={r.ticket_title}
                 >
@@ -280,7 +304,7 @@ function TeamBoards({
                   <span style={{ color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {r.ticket_title.slice(0, 32)}{r.ticket_title.length > 32 ? "…" : ""}
                   </span>
-                </div>
+                </button>
               );
             })}
             <div style={{ marginTop: 4, fontSize: 10, color: "var(--text-dim)" }}>

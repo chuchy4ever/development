@@ -301,7 +301,7 @@ function Templates() {
 
       {showImport && (
         <div className="modal-backdrop" onClick={() => setShowImport(false)}>
-          <div className="modal" style={{ width: 720 }} onClick={(e) => e.stopPropagation()}>
+          <div className="modal" role="dialog" aria-modal="true" style={{ width: 720 }} onClick={(e) => e.stopPropagation()}>
             <h3>Import workflow template</h3>
             <p style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 0 }}>
               Paste a template JSON (exported from another instance, or a curated team setup).

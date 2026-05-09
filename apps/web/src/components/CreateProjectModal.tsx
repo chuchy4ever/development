@@ -32,7 +32,7 @@ export function CreateProjectModal({ onClose, onCreated }: Props) {
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <form className="modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+      <form className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
         <h3>New project</h3>
         <div className="form-row">
           <label>Name</label>

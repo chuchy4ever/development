@@ -1186,7 +1186,7 @@ function TeamEditModal({
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
-        className="modal"
+        className="modal" role="dialog" aria-modal="true"
         onClick={(e) => e.stopPropagation()}
         style={{ width: "min(620px, 95vw)" }}
       >
@@ -1381,16 +1381,9 @@ function TeamCard({
   onClick?: () => void;
 }) {
   const cat = team.category ?? "general";
-  const colorByCat: Record<string, string> = {
-    planning: "#0ea5e9",
-    coding: "#7c5cff",
-    review: "#d29922",
-    validation: "#16a34a",
-    closing: "#10b981",
-    infra: "#ec4899",
-    general: "#6b7280",
-  };
-  const color = colorByCat[cat] ?? "#6b7280";
+  // Single source of truth for category color is in CSS (var(--cat-*)) so
+  // any tweak there flows through every chip / pill / lane / flow chip.
+  const color = `var(--cat-${cat})`;
   const Tag = onClick ? "button" : "div";
   return (
     <Tag
@@ -1429,7 +1422,7 @@ function TeamCard({
         {team.agent_names.map((n) => (
           <span key={n} style={{
             fontSize: 10, padding: "1px 6px", borderRadius: 8,
-            background: `${color}1a`, color, border: `1px solid ${color}55`,
+            background: `color-mix(in srgb, ${color} 10%, transparent)`, color, border: `1px solid color-mix(in srgb, ${color} 35%, transparent)`,
           }}>{n}</span>
         ))}
         {team.agent_names.length === 0 && (
@@ -2082,7 +2075,7 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
 
       {selected && (
         <div className="modal-backdrop" onClick={() => setSelectedPhaseId(null)}>
-          <div className="phase-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="phase-modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             <div className="phase-modal-header">
               <h3>
                 Phase
@@ -2530,7 +2523,7 @@ function TemplatePickerModal({ projectId, onClose, onApplied }: TemplatePickerMo
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" style={{ width: 720 }} onClick={(e) => e.stopPropagation()}>
+      <div className="modal" role="dialog" aria-modal="true" style={{ width: 720 }} onClick={(e) => e.stopPropagation()}>
         <h3>Playbook templates</h3>
         <p style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 0 }}>
           Apply a template to instantly clone a complete agent team + workflow into this project.
@@ -2622,7 +2615,7 @@ function SaveAsTemplateModal({ projectId, defaultKey, defaultName, onClose, onSa
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <form className="modal" style={{ width: 520 }} onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+      <form className="modal" role="dialog" aria-modal="true" style={{ width: 520 }} onClick={(e) => e.stopPropagation()} onSubmit={submit}>
         <h3>Save as playbook template</h3>
         <p style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 0 }}>
           Captures the current workflow + the agents it references. Saved as a JSON file in

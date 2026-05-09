@@ -51,7 +51,7 @@ export function BulkImportModal({ project, onClose, onCreated }: Props) {
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <form className="modal" style={{ width: 720 }} onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+      <form className="modal" role="dialog" aria-modal="true" style={{ width: 720 }} onClick={(e) => e.stopPropagation()} onSubmit={submit}>
         <h3>Bulk import</h3>
         <div className="form-row">
           <label>Markdown</label>

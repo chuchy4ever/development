@@ -83,9 +83,11 @@ function TicketCard({ ticket, parentTitle, children, activeRun, onClick }: CardP
   const isSubtask = !!ticket.parent_ticket_id;
   const hasChildren = !!children && children.length > 0;
   return (
-    <div
+    <button
+      type="button"
       className={`card ${isSubtask ? "card-subtask" : ""}`}
       onClick={onClick}
+      aria-label={`${ticket.ticket_key ?? ticket.id.slice(0, 6)} — ${ticket.title}`}
     >
       {parentTitle && (
         <div className="card-parent" title={`Subtask of: ${parentTitle}`}>
@@ -127,7 +129,7 @@ function TicketCard({ ticket, parentTitle, children, activeRun, onClick }: CardP
           waiting on {ticket.depends_on.length} ticket{ticket.depends_on.length === 1 ? "" : "s"}
         </div>
       )}
-    </div>
+    </button>
   );
 }
 

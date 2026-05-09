@@ -277,7 +277,7 @@ function AgentForm({ mode, initial, projectId, onClose, onSubmit }: FormProps) {
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <form
-        className="modal"
+        className="modal" role="dialog" aria-modal="true"
         style={{ width: 720, maxHeight: "85vh", display: "flex", flexDirection: "column" }}
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
@@ -392,7 +392,7 @@ function TemplatePickerModal({ templates, existingNames, onClose, onAdd }: Templ
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
-        className="modal"
+        className="modal" role="dialog" aria-modal="true"
         style={{ width: 720, maxHeight: "85vh", display: "flex", flexDirection: "column" }}
         onClick={(e) => e.stopPropagation()}
       >

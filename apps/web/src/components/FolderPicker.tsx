@@ -48,7 +48,7 @@ export function FolderPicker({ onPick, onClose }: Props) {
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
-        className="modal"
+        className="modal" role="dialog" aria-modal="true"
         style={{ width: 640, maxHeight: "80vh", display: "flex", flexDirection: "column" }}
         onClick={(e) => e.stopPropagation()}
       >

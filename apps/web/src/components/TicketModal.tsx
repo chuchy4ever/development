@@ -153,7 +153,7 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
   return (
     <>
       <div className="modal-backdrop" onClick={onClose}>
-        <div className="ticket-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="ticket-modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
           <header className="tm-header">
             <div className="tm-key-block">
               {ticket.ticket_key && <div className="tm-key">{ticket.ticket_key}</div>}

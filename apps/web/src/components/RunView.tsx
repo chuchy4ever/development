@@ -51,16 +51,39 @@ export function RunView({ runId, onClose }: Props) {
 
     // Batch incoming events: SSE can fire dozens per second during a busy run.
     // Without batching that's one re-render per event.
+    //
+    // Cap: a long run can emit thousands of claude_stream events. Unbounded
+    // accumulation slows re-renders and bloats memory. We keep the most recent
+    // EVENT_CAP events; older ones are dropped (they can still be retrieved
+    // via the Export Log button, which fetches from the server).
+    const EVENT_CAP = 5000;
     const queue: UiEvent[] = [];
     let flushTimer: number | null = null;
+    // Track seen ids in a Set we *carry* across flushes — O(1) dedup instead
+    // of rebuilding from prev.map() on every batch.
+    const seenIds = new Set<number>();
     const flush = () => {
       flushTimer = null;
       if (queue.length === 0) return;
       const batch = queue.splice(0, queue.length);
+      const fresh = batch.filter((e) => {
+        if (seenIds.has(e.id)) return false;
+        seenIds.add(e.id);
+        return true;
+      });
+      if (fresh.length === 0) return;
       setEvents((prev) => {
-        const seen = new Set(prev.map((p) => p.id));
-        const fresh = batch.filter((e) => !seen.has(e.id));
-        return fresh.length === 0 ? prev : [...prev, ...fresh];
+        const merged = prev.length + fresh.length <= EVENT_CAP
+          ? [...prev, ...fresh]
+          : [...prev, ...fresh].slice(-EVENT_CAP);
+        // Trim seenIds in step with the trimmed events array so it doesn't
+        // leak memory across a long-running session.
+        if (merged.length === EVENT_CAP) {
+          const keep = new Set<number>();
+          for (const e of merged) keep.add(e.id);
+          for (const id of seenIds) if (!keep.has(id)) seenIds.delete(id);
+        }
+        return merged;
       });
     };
 
@@ -168,7 +191,7 @@ export function RunView({ runId, onClose }: Props) {
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
-        className="modal"
+        className="modal" role="dialog" aria-modal="true"
         style={{ width: "min(1100px, 95vw)", height: "85vh", display: "flex", flexDirection: "column" }}
         onClick={(e) => e.stopPropagation()}
       >
@@ -280,19 +303,23 @@ export function RunView({ runId, onClose }: Props) {
         {events.length > 0 && <TeamFlowHeader events={events} />}
         {events.length > 0 && <AgentBreakdown events={events} />}
 
-        <div className="tabs" style={{ marginTop: 12, paddingLeft: 0 }}>
-          <div
-            className={`tab ${activeTab === "log" ? "active" : ""}`}
+        <div className="tabs" role="tablist" style={{ marginTop: 12, paddingLeft: 0 }}>
+          <button
+            role="tab"
+            aria-selected={activeTab === "log"}
+            className={`tab tab-button ${activeTab === "log" ? "active" : ""}`}
             onClick={() => setActiveTab("log")}
           >
             {t("run.live_log", { count: events.length })}
-          </div>
-          <div
-            className={`tab ${activeTab === "diff" ? "active" : ""}`}
+          </button>
+          <button
+            role="tab"
+            aria-selected={activeTab === "diff"}
+            className={`tab tab-button ${activeTab === "diff" ? "active" : ""}`}
             onClick={() => setActiveTab("diff")}
           >
             {t("run.diff", { count: diffs.length })}
-          </div>
+          </button>
           <div style={{ flex: 1 }} />
           {activeTab === "log" && events.length > 0 && (
             <button
@@ -477,7 +504,7 @@ function AgentBreakdown({ events }: { events: UiEvent[] }) {
               <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
                 <span style={{
                   display: "inline-block", width: 8, height: 8, borderRadius: "50%",
-                  background: s.role === "coder" ? "#7c5cff" : s.role === "reviewer" ? "#d29922" : s.role === "tester" ? "#16a34a" : s.role === "" ? "#0891b2" : "#6b7280",
+                  background: s.role === "coder" ? "var(--cat-coding)" : s.role === "reviewer" ? "var(--cat-review)" : s.role === "tester" ? "var(--cat-validation)" : s.role === "" ? "var(--cat-planning)" : "var(--cat-general)",
                   flex: "0 0 auto",
                 }} />
                 <b style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</b>
@@ -506,7 +533,7 @@ function AgentBreakdown({ events }: { events: UiEvent[] }) {
                 <span style={{
                   display: "inline-block", width: 40, height: 4, background: "var(--gray-soft)", borderRadius: 2, overflow: "hidden",
                 }}>
-                  <span style={{ display: "block", width: `${(share * 100).toFixed(0)}%`, height: "100%", background: "#7c5cff" }} />
+                  <span style={{ display: "block", width: `${(share * 100).toFixed(0)}%`, height: "100%", background: "var(--cat-coding)" }} />
                 </span>
                 ${s.cost_usd.toFixed(2)}
               </span>
@@ -589,14 +616,14 @@ function TeamFlowHeader({ events }: { events: UiEvent[] }) {
   if (steps.length === 0) return null;
 
   const colorFor = (s: FlowStep): string => {
-    if (s.action === "mark_done") return "#16a34a";
-    if (s.action === "give_up") return "#dc2626";
-    if (s.action === "use_playbook") return "#7c3aed";
-    if (s.role === "gate") return "#0891b2";
-    if (s.role === "coder") return "#7c5cff";
-    if (s.role === "reviewer") return "#d29922";
-    if (s.role === "tester") return "#16a34a";
-    return "#6b7280";
+    if (s.action === "mark_done") return "var(--cat-validation)";
+    if (s.action === "give_up") return "var(--red)";
+    if (s.action === "use_playbook") return "var(--cat-coding)";
+    if (s.role === "gate") return "var(--cat-planning)";
+    if (s.role === "coder") return "var(--cat-coding)";
+    if (s.role === "reviewer") return "var(--cat-review)";
+    if (s.role === "tester") return "var(--cat-validation)";
+    return "var(--cat-general)";
   };
 
   return (
@@ -615,7 +642,9 @@ function TeamFlowHeader({ events }: { events: UiEvent[] }) {
             <span style={{
               fontSize: 11,
               padding: "3px 8px", borderRadius: 12,
-              background: s.inProgress ? `${c}33` : `${c}22`,
+              background: s.inProgress
+                ? `color-mix(in srgb, ${c} 20%, transparent)`
+                : `color-mix(in srgb, ${c} 13%, transparent)`,
               border: `1px solid ${c}`,
               color: c,
               fontWeight: 600,
