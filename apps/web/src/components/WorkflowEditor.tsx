@@ -1476,11 +1476,16 @@ function SkillAgentEditor({
   project,
   onPickAgent,
   onAgentSaved,
+  view = "all",
 }: {
   phase: WorkflowPhase;
   project: ProjectWithRepos;
   onPickAgent: (agentId: string) => void;
   onAgentSaved: () => Promise<void>;
+  /** Which slice of the editor to render. "picker" = just the switch-agent
+   *  dropdown + library/sharing banners. "definition" = the editable agent
+   *  fields (name/role/model/tools/prompt). "all" = both stacked. */
+  view?: "all" | "picker" | "definition";
 }) {
   const agent = phase.agent_id ? project.agents.find((a) => a.id === phase.agent_id) ?? null : null;
   const fromLibrary = !!agent?.template_key;
@@ -1570,9 +1575,11 @@ function SkillAgentEditor({
     );
   }
 
+  const showPicker = view === "all" || view === "picker";
+  const showDefinition = view === "all" || view === "definition";
   return (
     <>
-      {fromLibrary && (
+      {showPicker && fromLibrary && (
         <div style={{
           padding: "8px 12px", borderRadius: 6,
           background: "rgba(14, 165, 233, 0.08)",
@@ -1591,7 +1598,7 @@ function SkillAgentEditor({
           >Open in Admin</button>
         </div>
       )}
-      {!fromLibrary && sharedCount > 0 && (
+      {showPicker && !fromLibrary && sharedCount > 0 && (
         <div style={{
           padding: "6px 10px", borderRadius: 6,
           background: "rgba(245, 158, 11, 0.08)",
@@ -1602,22 +1609,26 @@ function SkillAgentEditor({
           🔗 This agent is also used by {sharedCount} other skill{sharedCount === 1 ? "" : "s"} in this project — edits propagate.
         </div>
       )}
-      <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6, fontSize: 11, color: "var(--text-dim)" }}>
-        <span>Switch agent for this skill:</span>
-        <select
-          value={agent.id}
-          onChange={(e) => onPickAgent(e.target.value)}
-          style={{ flex: 1, fontSize: 12 }}
-        >
-          {project.agents
-            .filter((a) => !INTERNAL_AGENT_NAMES.has(a.name))
-            .map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name} ({a.role}{a.model ? `, ${a.model}` : ""}{a.template_key ? ` · 📚 ${a.template_key}` : ""})
-              </option>
-            ))}
-        </select>
-      </div>
+      {showPicker && (
+        <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12, fontSize: 11, color: "var(--text-dim)" }}>
+          <span>Switch agent for this skill:</span>
+          <select
+            value={agent.id}
+            onChange={(e) => onPickAgent(e.target.value)}
+            style={{ flex: 1, fontSize: 12 }}
+          >
+            {project.agents
+              .filter((a) => !INTERNAL_AGENT_NAMES.has(a.name))
+              .map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name} ({a.role}{a.model ? `, ${a.model}` : ""}{a.template_key ? ` · 📚 ${a.template_key}` : ""})
+                </option>
+              ))}
+          </select>
+        </div>
+      )}
+      {showDefinition && (<>
+
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 8 }}>
         <div className="form-row">
           <label>Name</label>
@@ -1661,6 +1672,7 @@ function SkillAgentEditor({
         />
         {saveErr && <div style={{ fontSize: 11, color: "var(--red)", marginTop: 4 }}>{saveErr}</div>}
       </div>
+      </>)}
     </>
   );
 }
@@ -1941,6 +1953,14 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
   // prompt/model/tools without leaving the playbook editor.
   // When true, opens AgentForm in create mode for "+ New specialist & skill".
   const [creatingNewAgent, setCreatingNewAgent] = useState(false);
+  // Active tab inside the phase-edit modal. Defaults to "skill" (the
+  // most-edited fields: id, category, notes, agent picker). "agent" shows
+  // the prompt/role/model/tools (or library lock banner). "advanced"
+  // surfaces the legacy graph-flow hints.
+  const [phaseModalTab, setPhaseModalTab] = useState<"skill" | "agent" | "advanced">("skill");
+  // Reset to first tab when a different phase opens, so the user always
+  // lands on the same default view.
+  useEffect(() => { setPhaseModalTab("skill"); }, [selectedPhaseId]);
   // Library picker — pulls global Skill templates from admin.
   const [showLibraryPicker, setShowLibraryPicker] = useState(false);
   const [libraryTemplates, setLibraryTemplates] = useState<AgentTemplate[]>([]);
@@ -2426,17 +2446,49 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
         />
       </div>
 
-      {selected && (
+      {selected && (() => {
+        const isAgentSkill = selected.kind === "agent" || !selected.kind;
+        const selectedAgent = selected.agent_id ? agentsById.get(selected.agent_id) : null;
+        const fromLibrary = !!selectedAgent?.template_key;
+        // Tabs only for agent-kind skills. Gates/approvals are flat (the
+        // distinction adds no value when there are only 2 sections).
+        const tab = phaseModalTab;
+        return (
         <div className="modal-backdrop" onClick={() => setSelectedPhaseId(null)}>
           <div className="phase-modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             <div className="phase-modal-header">
               <h3>
                 {getTaskKindForPhase(selected) !== null ? "Gate" : selected.kind === "approval" ? "Approval" : "Skill"}
                 <code style={{ background: "var(--gray-soft)", padding: "2px 8px", borderRadius: 6, fontSize: 13 }}>{selected.id}</code>
+                {fromLibrary && <span style={{
+                  marginLeft: 8, fontSize: 10, padding: "1px 6px", borderRadius: 8,
+                  background: "rgba(14, 165, 233, 0.12)", color: "#0369a1",
+                  border: "1px solid rgba(14, 165, 233, 0.3)", fontWeight: 500,
+                }}>📚 Library</span>}
               </h3>
               <button className="x-btn" onClick={() => setSelectedPhaseId(null)} title="Close (Esc)">×</button>
             </div>
+            {isAgentSkill && (
+              <div className="phase-modal-tabs" role="tablist">
+                <button
+                  type="button" role="tab" aria-selected={tab === "skill"}
+                  className={`phase-modal-tab ${tab === "skill" ? "active" : ""}`}
+                  onClick={() => setPhaseModalTab("skill")}
+                >Skill</button>
+                <button
+                  type="button" role="tab" aria-selected={tab === "agent"}
+                  className={`phase-modal-tab ${tab === "agent" ? "active" : ""}`}
+                  onClick={() => setPhaseModalTab("agent")}
+                >Agent definition</button>
+                <button
+                  type="button" role="tab" aria-selected={tab === "advanced"}
+                  className={`phase-modal-tab ${tab === "advanced" ? "active" : ""}`}
+                  onClick={() => setPhaseModalTab("advanced")}
+                >Advanced</button>
+              </div>
+            )}
             <div className="phase-modal-body">
+            {(!isAgentSkill || tab === "skill") && (
             <div className="form-row">
               <label>id</label>
               <input
@@ -2457,8 +2509,8 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
                 }}
               />
             </div>
-            {selected.kind !== "director" && (() => {
-              const selectedAgent = selected.agent_id ? agentsById.get(selected.agent_id) : null;
+            )}
+            {(!isAgentSkill || tab === "skill") && selected.kind !== "director" && (() => {
               const derived = deriveSkillCategory(selected, selectedAgent ? { name: selectedAgent.name, role: selectedAgent.role } : null);
               return (
                 <div className="form-row">
@@ -2594,14 +2646,28 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
                 }}
               />
             ) : (
-              <SkillAgentEditor
-                phase={selected}
-                project={project}
-                onPickAgent={(id) => updatePhase(selected.id, { agent_id: id })}
-                onAgentSaved={async () => { if (onChanged) await onChanged(); }}
-              />
+              <>
+                {tab === "skill" && (
+                  <SkillAgentEditor
+                    phase={selected}
+                    project={project}
+                    onPickAgent={(id) => updatePhase(selected.id, { agent_id: id })}
+                    onAgentSaved={async () => { if (onChanged) await onChanged(); }}
+                    view="picker"
+                  />
+                )}
+                {tab === "agent" && (
+                  <SkillAgentEditor
+                    phase={selected}
+                    project={project}
+                    onPickAgent={(id) => updatePhase(selected.id, { agent_id: id })}
+                    onAgentSaved={async () => { if (onChanged) await onChanged(); }}
+                    view="definition"
+                  />
+                )}
+              </>
             )}
-            {getTaskKindForPhase(selected) === null && (
+            {tab === "skill" && getTaskKindForPhase(selected) === null && (
               <div className="form-row">
                 <label>notes (appended to this skill's prompt every time it runs)</label>
                 <textarea
@@ -2613,7 +2679,7 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
                 />
               </div>
             )}
-            {getTaskKindForPhase(selected) === null && (
+            {(!isAgentSkill || tab === "advanced") && getTaskKindForPhase(selected) === null && (
               <div className="form-row">
                 <label>agent timeout (seconds, 0 = none, max 3600)</label>
                 <input
@@ -2628,7 +2694,11 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
                 </div>
               </div>
             )}
-            <details style={{ marginTop: 12, padding: "8px 10px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6 }}>
+            {(!isAgentSkill || tab === "advanced") && (
+            <details
+              style={{ marginTop: 12, padding: "8px 10px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6 }}
+              open={isAgentSkill && tab === "advanced"}
+            >
               <summary style={{ cursor: "pointer", fontSize: 12, color: "var(--text-dim)" }}>
                 ▸ Graph hints (advisory — only visible to Director when planning)
               </summary>
@@ -2699,15 +2769,29 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
                 >Reset graph position</button>
               </div>
             </details>
+            )}
             </div>
             <div className="phase-modal-footer">
-              <button className="danger" onClick={() => { deletePhase(selected.id); setSelectedPhaseId(null); }}>Delete</button>
+              <button
+                className="danger"
+                onClick={() => {
+                  if (fromLibrary) {
+                    if (!confirm(`Remove "${selectedAgent?.name ?? selected.id}" from this project?\n\nThis only un-imports the skill from the project. The library template stays in Admin and can be re-imported anytime.`)) return;
+                  }
+                  deletePhase(selected.id);
+                  setSelectedPhaseId(null);
+                }}
+                title={fromLibrary ? "Un-import this library skill from the project. Template stays in Admin." : "Delete this skill (and its agent if no other skill uses it)"}
+              >
+                {fromLibrary ? "Remove from project" : "Delete"}
+              </button>
               <div style={{ flex: 1 }} />
               <button className="primary" onClick={() => setSelectedPhaseId(null)}>Done</button>
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {showTemplates && (
         <TemplatePickerModal

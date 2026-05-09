@@ -1076,13 +1076,42 @@ code {
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: 14px;
-  width: min(560px, 92vw);
-  max-height: 88vh;
+  width: min(820px, 95vw);
+  max-height: 90vh;
   display: flex;
   flex-direction: column;
   box-shadow: var(--shadow-lg);
   animation: pop 0.16s cubic-bezier(0.2, 0.9, 0.4, 1.2);
   overflow: hidden;
+}
+/* Tabs inside the phase modal — sit between header and body. */
+.phase-modal-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.phase-modal-tab {
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 10px 14px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 0.12s;
+}
+.phase-modal-tab:hover { color: var(--text); }
+.phase-modal-tab.active {
+  color: var(--accent-strong);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.phase-modal-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 .phase-modal-header {
   display: flex;
