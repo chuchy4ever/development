@@ -365,11 +365,21 @@ function PhaseNode({ data, selected }: NodeProps<PhaseNodeData>) {
           className="n8n-node-sublabel"
           style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 10, opacity: 0.75 }}
         >
+          <span style={{ textTransform: "uppercase", fontWeight: 600, letterSpacing: 0.5, marginRight: 4, opacity: 0.7 }}>
+            Gate
+          </span>
           {taskMeta?.label ?? taskType}
           {taskSummary ? ` · ${taskSummary}` : ""}
         </div>
       ) : (
-        agent && <div className="n8n-node-sublabel">{agent.name}</div>
+        agent && (
+          <div className="n8n-node-sublabel">
+            <span style={{ textTransform: "uppercase", fontWeight: 600, letterSpacing: 0.5, marginRight: 4, opacity: 0.65, fontSize: 9 }}>
+              Skill
+            </span>
+            {agent.name}
+          </div>
+        )
       )}
     </div>
   );
@@ -557,6 +567,10 @@ function buildFlow(
   for (const p of visiblePhases) {
     if (p.next) {
       const bypass = needsBypassArc(p.id, p.next);
+      // "next" is an advisory hint to Director (common follow-up), not enforced
+      // sequencing. Render dotted/lighter to communicate that Director may
+      // skip, reorder, or revisit. Retry edges (red dashed) and routes stay
+      // strong because they encode escalation rules Director respects.
       edges.push({
         id: `next-${p.id}-${p.next}`,
         type: bypass ? "bypass" : "default",
@@ -564,8 +578,8 @@ function buildFlow(
         sourceHandle: "out",
         target: p.next,
         targetHandle: "in",
-        markerEnd: { type: MarkerType.ArrowClosed, color: "#3b82f6" },
-        style: { stroke: "#3b82f6", strokeWidth: 2.5 },
+        markerEnd: { type: MarkerType.ArrowClosed, color: "#93c5fd" },
+        style: { stroke: "#93c5fd", strokeWidth: 1.5, strokeDasharray: "4 3" },
         deletable: true,
         data: { kind: "next" },
       });
@@ -998,7 +1012,7 @@ export function WorkflowEditor({ project, tickets }: Props) {
   }, [selectedPhaseId]);
 
   if (err) return <div style={{ color: "var(--red)" }}>{err}</div>;
-  if (!wf) return <div style={{ color: "var(--text-dim)" }}>Loading workflow…</div>;
+  if (!wf) return <div style={{ color: "var(--text-dim)" }}>Loading playbook…</div>;
   if (project.agents.length === 0) {
     return (
       <div style={{ color: "var(--text-dim)" }}>
@@ -1105,7 +1119,7 @@ export function WorkflowEditor({ project, tickets }: Props) {
   }
 
   async function reset() {
-    if (!confirm("Reset workflow to default (one phase per agent role)?")) return;
+    if (!confirm("Reset playbook to default (one skill per agent role)?")) return;
     setBusy(true);
     setInfo(null);
     try {
@@ -1119,6 +1133,21 @@ export function WorkflowEditor({ project, tickets }: Props) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "calc(100vh - 240px)", minHeight: 500 }}>
+      <div style={{
+        display: "flex", alignItems: "center", gap: 12,
+        padding: "8px 14px", marginBottom: -4,
+        background: "rgba(124, 58, 237, 0.06)",
+        border: "1px solid rgba(124, 58, 237, 0.18)",
+        borderRadius: 8, fontSize: 12, color: "var(--text-dim)",
+      }}>
+        <span style={{ fontSize: 16 }}>🎬</span>
+        <span>
+          <b style={{ color: "#7c3aed" }}>Director orchestrates this playbook.</b>{" "}
+          You design the library of <b>skills</b> (AI steps) and <b>gates</b> (deterministic checks);
+          Director picks which to run, in what order, based on the ticket.
+          Solid arrows are escalation rules Director respects; dotted arrows are common follow-ups (advisory).
+        </span>
+      </div>
       <div className="wf-canvas-wrap">
         <WorkflowFloatingToolbar
           busy={busy}
@@ -1211,7 +1240,7 @@ export function WorkflowEditor({ project, tickets }: Props) {
       </div>
 
       <div className="settings-section" style={{ marginBottom: 0 }}>
-        <h3>Project specifics for this workflow</h3>
+        <h3>Project specifics for this playbook</h3>
         <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 6 }}>
           Markdown injected into <em>every</em> agent's prompt during runs of this project.
         </div>
@@ -1315,8 +1344,8 @@ export function WorkflowEditor({ project, tickets }: Props) {
                 {selected.kind === "approval"
                   ? "Pauses the run until you click Approve / Reject in the run view."
                   : getTaskKindForPhase(selected) !== null
-                  ? "Deterministic action — no AI, no tokens. ok=true → next; ok=false → retry target."
-                  : "AI agent step. Verdict drives next/retry/route."}
+                  ? "Gate — deterministic check (no AI, no tokens). Director runs it on demand; ok=true unblocks mark_done."
+                  : "Skill — AI specialist Director can dispatch. Verdict drives Director's next decision."}
               </div>
             </div>
             <div className="form-row">
@@ -1614,7 +1643,7 @@ function TemplatePickerModal({ projectId, onClose, onApplied }: TemplatePickerMo
 
   async function apply(key: string) {
     if (!confirm(
-      "Apply this template? It will REPLACE the current workflow and add any missing agents " +
+      "Apply this template? It will REPLACE the current playbook and add any missing agents " +
       "(existing agents with the same name are kept).",
     )) return;
     setBusy(key);
@@ -1646,7 +1675,7 @@ function TemplatePickerModal({ projectId, onClose, onApplied }: TemplatePickerMo
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" style={{ width: 720 }} onClick={(e) => e.stopPropagation()}>
-        <h3>Workflow templates</h3>
+        <h3>Playbook templates</h3>
         <p style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 0 }}>
           Apply a template to instantly clone a complete agent team + workflow into this project.
         </p>
@@ -1737,7 +1766,7 @@ function SaveAsTemplateModal({ projectId, defaultKey, defaultName, onClose, onSa
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <form className="modal" style={{ width: 520 }} onClick={(e) => e.stopPropagation()} onSubmit={submit}>
-        <h3>Save as workflow template</h3>
+        <h3>Save as playbook template</h3>
         <p style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 0 }}>
           Captures the current workflow + the agents it references. Saved as a JSON file in
           <code> ~/.ceo/templates/</code>; can be applied to other projects.

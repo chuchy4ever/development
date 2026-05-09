@@ -245,7 +245,7 @@ function Templates() {
   return (
     <div style={{ maxWidth: 900 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <h3 style={{ margin: 0 }}>Workflow templates</h3>
+        <h3 style={{ margin: 0 }}>Playbook templates</h3>
         <button className="primary" onClick={() => setShowImport(true)} disabled={busy}>
           Import JSON…
         </button>

@@ -96,7 +96,7 @@ export function ProjectView({ project, route, navigate, onChanged, onDeleted }: 
           Agents
         </div>
         <div className={`tab ${tab === "workflow" ? "active" : ""}`} onClick={() => setTab("workflow")}>
-          Workflow
+          Playbook
         </div>
         <div className={`tab ${tab === "memory" ? "active" : ""}`} onClick={() => setTab("memory")}>
           Memory

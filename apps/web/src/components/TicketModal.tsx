@@ -384,7 +384,7 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
               className="primary"
               onClick={startRun}
               disabled={busy || !canStartRun}
-              title={!canStartRun ? "Add a folder or wait for current run" : "Start workflow run"}
+              title={!canStartRun ? "Add a folder or wait for current run" : "Start Director run"}
             >
               {busy ? "..." : "▶ Start run"}
             </button>
