@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { ProjectWithRepos } from "@ceo/shared";
 import { api } from "../api";
+import { useEscClose } from "../hooks";
 
 interface Props {
   project: ProjectWithRepos;
@@ -25,6 +26,7 @@ List products with category filter.
 `;
 
 export function BulkImportModal({ project, onClose, onCreated }: Props) {
+  useEscClose(onClose);
   const [markdown, setMarkdown] = useState("");
   const [autoTriage, setAutoTriage] = useState(true);
   const [busy, setBusy] = useState(false);

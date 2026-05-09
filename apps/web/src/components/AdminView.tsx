@@ -203,6 +203,14 @@ function Templates() {
   const [importText, setImportText] = useState("");
   const [showImport, setShowImport] = useState(false);
 
+  // Esc closes the import dialog when it's open.
+  useEffect(() => {
+    if (!showImport) return;
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") setShowImport(false); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [showImport]);
+
   async function refresh() {
     try {
       setList(await api.listWorkflowPresets());

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Priority, ProjectWithRepos, Run, Ticket, TicketStatus } from "@ceo/shared";
 import { api } from "../api";
 import { RunView } from "./RunView";
+import { useEscClose } from "../hooks";
 
 interface Props {
   ticket: Ticket;
@@ -33,6 +34,7 @@ const STATUS_FG: Record<TicketStatus, string> = {
 };
 
 export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose, onChanged }: Props) {
+  useEscClose(onClose);
   const parent = ticket.parent_ticket_id
     ? (allTickets ?? []).find((t) => t.id === ticket.parent_ticket_id) ?? null
     : null;

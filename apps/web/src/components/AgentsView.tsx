@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { Agent, AgentRole, AgentTemplate, ProjectWithRepos } from "@ceo/shared";
 import { api } from "../api";
 import { t, useLang } from "../i18n";
+import { useEscClose } from "../hooks";
 
 interface Props {
   project: ProjectWithRepos;
@@ -226,6 +227,7 @@ interface FormProps {
 }
 
 function AgentForm({ mode, initial, projectId, onClose, onSubmit }: FormProps) {
+  useEscClose(onClose);
   const [name, setName] = useState(initial?.name ?? "");
   const [role, setRole] = useState<AgentRole>(initial?.role ?? "coder");
   const [category, setCategory] = useState(initial?.category ?? "Development");
@@ -377,6 +379,7 @@ interface TemplatePickerProps {
 }
 
 function TemplatePickerModal({ templates, existingNames, onClose, onAdd }: TemplatePickerProps) {
+  useEscClose(onClose);
   const grouped = useMemo(() => {
     const map = new Map<string, AgentTemplate[]>();
     for (const t of templates) {

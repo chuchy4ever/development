@@ -37,6 +37,7 @@ import {
 import { api } from "../api";
 import { AgentsView } from "./AgentsView";
 import { t, useLang } from "../i18n";
+import { useEscClose } from "../hooks";
 import { CodeEditorModal } from "./CodeEditorModal";
 
 interface Props {
@@ -1075,11 +1076,14 @@ function TeamsPanel({
   agents: Agent[];
   onChange: (updater: (next: WorkflowDefinition) => void) => void;
 }) {
-  // Open by default if there are teams — the flow diagram is the value
-  // proposition; editing is on demand.
   const [open, setOpen] = useState(true);
-  const [editMode, setEditMode] = useState(false);
+  // null = closed; "new" = create mode; <id> = edit existing.
+  const [editing, setEditing] = useState<null | "new" | string>(null);
   const teams = wf.teams ?? [];
+  const editingTeam = typeof editing === "string" && editing !== "new"
+    ? teams.find((tm) => tm.id === editing) ?? null
+    : null;
+
   return (
     <CollapsibleSection
       open={open}
@@ -1093,88 +1097,176 @@ function TeamsPanel({
           {t("section.teams.empty")}
         </div>
       )}
-      {teams.length > 0 && (
-        <>
-          <TeamsFlowDiagram teams={teams} playbooks={wf.playbooks ?? []} agents={agents} />
-          <div style={{ display: "flex", gap: 8, marginTop: 10, marginBottom: 4 }}>
-            <button onClick={() => setEditMode((m) => !m)} style={{ fontSize: 11 }}>
-              {editMode ? "▾ hide editor" : "✏ edit teams"}
-            </button>
-          </div>
-        </>
+      <TeamsFlowDiagram
+        teams={teams}
+        playbooks={wf.playbooks ?? []}
+        agents={agents}
+        onCardClick={(id) => setEditing(id)}
+        onAddClick={() => setEditing("new")}
+      />
+      {editing && (
+        <TeamEditModal
+          mode={editing === "new" ? "create" : "edit"}
+          initial={editingTeam}
+          agents={agents}
+          existingIds={teams.map((tm) => tm.id)}
+          onClose={() => setEditing(null)}
+          onSave={(team) => {
+            onChange((next) => {
+              if (!next.teams) next.teams = [];
+              const idx = next.teams.findIndex((tm) => tm.id === team.id);
+              if (idx >= 0) next.teams[idx] = team;
+              else next.teams.push(team);
+            });
+            setEditing(null);
+          }}
+          onDelete={editing !== "new" ? () => {
+            onChange((next) => { next.teams = (next.teams ?? []).filter((tm) => tm.id !== editing); });
+            setEditing(null);
+          } : undefined}
+        />
       )}
-      <div style={{ display: (teams.length === 0 || editMode) ? "block" : "none" }}>
+    </CollapsibleSection>
+  );
+}
 
-      {teams.map((t, idx) => (
-        <div key={t.id} style={{
-          border: "1px solid var(--border)", borderRadius: 6, padding: 10, marginTop: 8, background: "var(--bg)",
-        }}>
-          <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
-            <input
-              value={t.name}
-              placeholder="Dev Team"
-              onChange={(e) => onChange((next) => { if (next.teams) next.teams[idx]!.name = e.target.value; })}
-              style={{ flex: "0 0 180px" }}
-            />
-            <select
-              value={t.category ?? ""}
-              onChange={(e) => onChange((next) => { if (next.teams) next.teams[idx]!.category = (e.target.value || undefined) as SkillCategory | undefined; })}
-              style={{ flex: "0 0 130px" }}
-            >
-              <option value="">no category</option>
-              {SKILL_CATEGORY_ORDER.map((c) => (
-                <option key={c} value={c}>{SKILL_CATEGORY_LABEL[c]}</option>
-              ))}
-            </select>
-            <input
-              value={t.description ?? ""}
-              placeholder="when to reach for this team"
-              onChange={(e) => onChange((next) => { if (next.teams) next.teams[idx]!.description = e.target.value; })}
-              style={{ flex: 1 }}
-            />
-            <button
-              onClick={() => onChange((next) => { next.teams = (next.teams ?? []).filter((_, i) => i !== idx); })}
-              title="Remove team"
-            >×</button>
-          </div>
-          <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>Members:</div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+/**
+ * TeamEditModal — single-purpose dialog for creating or editing a team.
+ * Replaces the old inline form (which fought with the flow diagram for
+ * attention). Members picked via chip toggles; auto-generates a stable id
+ * from the name on create.
+ */
+function TeamEditModal({
+  mode,
+  initial,
+  agents,
+  existingIds,
+  onClose,
+  onSave,
+  onDelete,
+}: {
+  mode: "create" | "edit";
+  initial: NonNullable<WorkflowDefinition["teams"]>[number] | null;
+  agents: Agent[];
+  existingIds: string[];
+  onClose: () => void;
+  onSave: (team: NonNullable<WorkflowDefinition["teams"]>[number]) => void;
+  onDelete?: () => void;
+}) {
+  useEscClose(onClose);
+  const [name, setName] = useState(initial?.name ?? "");
+  const [description, setDescription] = useState(initial?.description ?? "");
+  const [category, setCategory] = useState<SkillCategory | "">(initial?.category ?? "");
+  const [memberNames, setMemberNames] = useState<string[]>(initial?.agent_names ?? []);
+
+  function genId(fromName: string): string {
+    const base = fromName.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "team";
+    if (!existingIds.includes(base)) return base;
+    let n = 2;
+    while (existingIds.includes(`${base}_${n}`)) n++;
+    return `${base}_${n}`;
+  }
+
+  const canSave = name.trim().length > 0;
+
+  function save() {
+    if (!canSave) return;
+    onSave({
+      id: initial?.id ?? genId(name),
+      name: name.trim(),
+      description: description.trim() || undefined,
+      category: category || undefined,
+      agent_names: memberNames,
+    });
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        style={{ width: "min(620px, 95vw)" }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <h3 style={{ margin: 0 }}>{mode === "create" ? "New team" : `Edit team: ${initial?.name}`}</h3>
+          <button
+            onClick={onClose}
+            style={{ background: "transparent", border: 0, fontSize: 20, cursor: "pointer", color: "var(--text-dim)" }}
+            title="Close (Esc)"
+          >×</button>
+        </div>
+        <div className="form-row">
+          <label>Name</label>
+          <input
+            value={name}
+            placeholder="Dev Team"
+            onChange={(e) => setName(e.target.value)}
+            autoFocus
+          />
+        </div>
+        <div className="form-row">
+          <label>Category</label>
+          <select value={category} onChange={(e) => setCategory(e.target.value as SkillCategory | "")}>
+            <option value="">no category</option>
+            {SKILL_CATEGORY_ORDER.map((c) => (
+              <option key={c} value={c}>{SKILL_CATEGORY_LABEL[c]}</option>
+            ))}
+          </select>
+        </div>
+        <div className="form-row">
+          <label>Description</label>
+          <input
+            value={description}
+            placeholder="when to reach for this team"
+            onChange={(e) => setDescription(e.target.value)}
+          />
+        </div>
+        <div className="form-row">
+          <label>Members ({memberNames.length})</label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: 8, background: "var(--bg)", borderRadius: 6, border: "1px solid var(--border)" }}>
             {agents.map((a) => {
-              const member = t.agent_names.includes(a.name);
+              const member = memberNames.includes(a.name);
               return (
                 <button
                   key={a.id}
-                  onClick={() => onChange((next) => {
-                    const team = next.teams?.[idx];
-                    if (!team) return;
-                    if (team.agent_names.includes(a.name)) {
-                      team.agent_names = team.agent_names.filter((n) => n !== a.name);
-                    } else {
-                      team.agent_names = [...team.agent_names, a.name];
-                    }
-                  })}
+                  type="button"
+                  onClick={() => setMemberNames(
+                    member
+                      ? memberNames.filter((n) => n !== a.name)
+                      : [...memberNames, a.name],
+                  )}
                   style={{
-                    fontSize: 11, padding: "2px 8px", borderRadius: 12,
+                    fontSize: 12, padding: "4px 10px", borderRadius: 14,
                     background: member ? "#7c3aed" : "var(--bg-elev)",
                     color: member ? "#fff" : "var(--text)",
                     border: `1px solid ${member ? "#7c3aed" : "var(--border)"}`,
                   }}
-                >{a.name}</button>
+                >
+                  <span style={{ marginRight: 4, opacity: 0.8 }}>{ROLE_GLYPH[a.role] ?? "·"}</span>
+                  {a.name}
+                </button>
               );
             })}
           </div>
         </div>
-      ))}
-      <button
-        style={{ marginTop: 10 }}
-        onClick={() => onChange((next) => {
-          if (!next.teams) next.teams = [];
-          const id = `team_${next.teams.length + 1}`;
-          next.teams.push({ id, name: `Team ${next.teams.length + 1}`, agent_names: [] });
-        })}
-      >+ {t("btn.add_team")}</button>
+        <div style={{ display: "flex", gap: 8, justifyContent: "space-between", marginTop: 16 }}>
+          <div>
+            {onDelete && (
+              <button
+                className="danger"
+                onClick={() => { if (confirm(`Delete team "${initial?.name}"?`)) onDelete(); }}
+              >Delete team</button>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={onClose}>{t("common.cancel")}</button>
+            <button className="primary" onClick={save} disabled={!canSave}>
+              {mode === "create" ? "Create team" : t("common.save")}
+            </button>
+          </div>
+        </div>
       </div>
-    </CollapsibleSection>
+    </div>
   );
 }
 
@@ -1191,10 +1283,14 @@ function TeamsFlowDiagram({
   teams,
   playbooks,
   agents,
+  onCardClick,
+  onAddClick,
 }: {
   teams: WorkflowDefinition["teams"] extends (infer U)[] | undefined ? U[] : never;
   playbooks: NonNullable<WorkflowDefinition["playbooks"]>;
   agents: Agent[];
+  onCardClick?: (id: string) => void;
+  onAddClick?: () => void;
 }) {
   // Resolve agent name -> first team it belongs to (for arrow inference).
   const teamByAgentName = new Map<string, string>();
@@ -1237,7 +1333,7 @@ function TeamsFlowDiagram({
       <div style={{ display: "flex", alignItems: "stretch", gap: 0, minWidth: "fit-content" }}>
         {sorted.map((team, i) => (
           <div key={team.id} style={{ display: "flex", alignItems: "center" }}>
-            <TeamCard team={team} />
+            <TeamCard team={team} onClick={onCardClick ? () => onCardClick(team.id) : undefined} />
             {i < sorted.length - 1 && (
               <div style={{
                 fontSize: 18, color: "var(--text-dim)",
@@ -1246,6 +1342,33 @@ function TeamsFlowDiagram({
             )}
           </div>
         ))}
+        {onAddClick && (
+          <div style={{ display: "flex", alignItems: "center" }}>
+            {sorted.length > 0 && (
+              <div style={{
+                fontSize: 18, color: "var(--text-dim)",
+                padding: "0 10px", alignSelf: "center", opacity: 0.5,
+              }}>→</div>
+            )}
+            <button
+              onClick={onAddClick}
+              title="Add team"
+              style={{
+                flex: "0 0 auto", minWidth: 100, minHeight: 90,
+                padding: 10,
+                background: "transparent",
+                border: "2px dashed var(--border)",
+                borderRadius: 10,
+                color: "var(--text-dim)",
+                fontSize: 13, cursor: "pointer",
+                display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4,
+              }}
+            >
+              <span style={{ fontSize: 24 }}>+</span>
+              <span style={{ fontSize: 11 }}>add team</span>
+            </button>
+          </div>
+        )}
       </div>
       {playbooks.length > 0 && (
         <div style={{ marginTop: 12, fontSize: 11, color: "var(--text-dim)" }}>
@@ -1266,7 +1389,13 @@ function TeamsFlowDiagram({
   );
 }
 
-function TeamCard({ team }: { team: NonNullable<WorkflowDefinition["teams"]>[number] }) {
+function TeamCard({
+  team,
+  onClick,
+}: {
+  team: NonNullable<WorkflowDefinition["teams"]>[number];
+  onClick?: () => void;
+}) {
   const cat = team.category ?? "general";
   const colorByCat: Record<string, string> = {
     planning: "#0ea5e9",
@@ -1278,8 +1407,12 @@ function TeamCard({ team }: { team: NonNullable<WorkflowDefinition["teams"]>[num
     general: "#6b7280",
   };
   const color = colorByCat[cat] ?? "#6b7280";
+  const Tag = onClick ? "button" : "div";
   return (
-    <div style={{
+    <Tag
+      onClick={onClick}
+      title={onClick ? "Click to edit" : undefined}
+      style={{
       flex: "0 0 auto",
       minWidth: 160, maxWidth: 200,
       padding: 10,
@@ -1287,7 +1420,13 @@ function TeamCard({ team }: { team: NonNullable<WorkflowDefinition["teams"]>[num
       border: `2px solid ${color}`,
       borderRadius: 10,
       position: "relative",
-    }}>
+      textAlign: "left",
+      cursor: onClick ? "pointer" : "default",
+      transition: "transform 80ms ease",
+    }}
+      onMouseEnter={onClick ? (e) => { (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)"; } : undefined}
+      onMouseLeave={onClick ? (e) => { (e.currentTarget as HTMLElement).style.transform = ""; } : undefined}
+    >
       <div style={{
         position: "absolute", top: -8, left: 10,
         background: "var(--bg)", padding: "0 6px",
@@ -1313,7 +1452,7 @@ function TeamCard({ team }: { team: NonNullable<WorkflowDefinition["teams"]>[num
           <span style={{ fontSize: 10, color: "var(--text-dim)", fontStyle: "italic" }}>no members</span>
         )}
       </div>
-    </div>
+    </Tag>
   );
 }
 
@@ -2338,6 +2477,7 @@ interface TemplatePickerModalProps {
 }
 
 function TemplatePickerModal({ projectId, onClose, onApplied }: TemplatePickerModalProps) {
+  useEscClose(onClose);
   const [list, setList] = useState<WorkflowPreset[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -2448,6 +2588,7 @@ interface SaveAsTemplateModalProps {
 }
 
 function SaveAsTemplateModal({ projectId, defaultKey, defaultName, onClose, onSaved }: SaveAsTemplateModalProps) {
+  useEscClose(onClose);
   const [key, setKey] = useState(defaultKey);
   const [name, setName] = useState(defaultName);
   const [description, setDescription] = useState("");

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { ProjectWithRepos } from "@ceo/shared";
 import { api } from "../api";
+import { useEscClose } from "../hooks";
 
 interface Props {
   onClose: () => void;
@@ -8,6 +9,7 @@ interface Props {
 }
 
 export function CreateProjectModal({ onClose, onCreated }: Props) {
+  useEscClose(onClose);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [busy, setBusy] = useState(false);

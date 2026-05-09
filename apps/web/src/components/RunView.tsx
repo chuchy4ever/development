@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import type { Run } from "@ceo/shared";
 import { api, streamRunEvents } from "../api";
 import { t, useLang } from "../i18n";
+import { useEscClose } from "../hooks";
 
 interface Props {
   runId: string;
@@ -35,6 +36,7 @@ function classifyEvent(type: string): FilterKey | null {
 }
 
 export function RunView({ runId, onClose }: Props) {
+  useEscClose(onClose);
   useLang();
   const [run, setRun] = useState<Run | null>(null);
   const [events, setEvents] = useState<UiEvent[]>([]);
