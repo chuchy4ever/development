@@ -585,7 +585,6 @@ function TeamFlowHeader({ events }: { events: UiEvent[] }) {
         let label = action;
         if (action === "dispatch") label = a.subagent ?? "agent";
         else if (action === "run_playbook_phase") label = a.phase_id ?? "phase";
-        else if (action === "use_playbook") label = `📖 ${a.playbook ?? "playbook"}`;
         else if (action === "run_ci_gate") label = "ci_gate";
         else if (action === "mark_done") label = "✓ done";
         else if (action === "give_up") label = "✗ give_up";
@@ -618,7 +617,6 @@ function TeamFlowHeader({ events }: { events: UiEvent[] }) {
   const colorFor = (s: FlowStep): string => {
     if (s.action === "mark_done") return "var(--cat-validation)";
     if (s.action === "give_up") return "var(--red)";
-    if (s.action === "use_playbook") return "var(--cat-coding)";
     if (s.role === "gate") return "var(--cat-planning)";
     if (s.role === "coder") return "var(--cat-coding)";
     if (s.role === "reviewer") return "var(--cat-review)";

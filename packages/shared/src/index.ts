@@ -443,9 +443,14 @@ export interface Team {
   agent_names: string[];
 }
 
-/** Step within a named Playbook — a reference to a skill/gate (phase) the
- *  Playbook walks in order. Director executes them sequentially when invoking
- *  the Playbook, with optional per-step note overrides. */
+/** @deprecated Named Playbooks were dropped in favor of Director's ad-hoc
+ *  dispatch chain (which hit similar costs in practice and didn't add UI
+ *  complexity). The types stay for back-compat with existing project data
+ *  and templates that may still carry playbooks[]; the engine no longer
+ *  renders or invokes them. Safe to remove from new projects.
+ *
+ *  Step within a named Playbook — a reference to a skill/gate (phase) the
+ *  Playbook walks in order. */
 export interface PlaybookStep {
   /** Phase id from WorkflowDefinition.phases. */
   phase_id: string;
@@ -456,10 +461,7 @@ export interface PlaybookStep {
   optional?: boolean;
 }
 
-/** A named recipe Director can pick to solve a class of problem. Bundles an
- *  ordered list of skills + gates with a "when to use" rule. Director sees
- *  the Playbook registry in its system prompt and may dispatch one via the
- *  use_playbook action. */
+/** @deprecated See PlaybookStep. */
 export interface Playbook {
   /** Unique within a workflow. */
   name: string;
