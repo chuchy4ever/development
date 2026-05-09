@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ActiveRunSummary, ProjectWithRepos, Ticket } from "@ceo/shared";
+import { SKILL_CATEGORY_LABEL, SKILL_CATEGORY_ORDER } from "@ceo/shared";
 import { api } from "../api";
 import type { Route, Tab } from "../router";
 import { Kanban } from "./Kanban";
@@ -121,6 +122,7 @@ export function ProjectView({ project, route, navigate, onChanged, onDeleted }: 
                 await refreshTickets();
               }}
             />
+            <TeamBoards project={project} activeRuns={activeRuns} tickets={tickets} onCardClick={setOpenTicket} />
             <Kanban
               tickets={tickets}
               activeRuns={activeRuns}
@@ -157,5 +159,115 @@ export function ProjectView({ project, route, navigate, onChanged, onDeleted }: 
         />
       )}
     </>
+  );
+}
+
+
+/**
+ * TeamBoards — strip of mini-boards, one per team, showing the tickets
+ * currently being handled by that team (i.e., active runs whose dispatched
+ * agent belongs to the team). Sits above the main Kanban for quick "where
+ * is the work right now?" awareness.
+ */
+function TeamBoards({
+  project,
+  activeRuns,
+  tickets,
+  onCardClick,
+}: {
+  project: ProjectWithRepos;
+  activeRuns: ActiveRunSummary[];
+  tickets: Ticket[];
+  onCardClick: (t: Ticket) => void;
+}) {
+  const teams = project.workflow.teams ?? [];
+  if (teams.length === 0) return null;
+  // Map agent name → team(s).
+  const teamByAgentName = new Map<string, typeof teams>();
+  for (const t of teams) {
+    for (const n of t.agent_names) {
+      const list = teamByAgentName.get(n) ?? [];
+      list.push(t);
+      teamByAgentName.set(n, list);
+    }
+  }
+  // Group active runs by team.
+  const runsByTeam = new Map<string, ActiveRunSummary[]>();
+  for (const r of activeRuns) {
+    const name = r.current_agent_name ?? "";
+    const matched = teamByAgentName.get(name) ?? [];
+    for (const tm of matched) {
+      const list = runsByTeam.get(tm.id) ?? [];
+      list.push(r);
+      runsByTeam.set(tm.id, list);
+    }
+  }
+  const ticketById = new Map(tickets.map((t) => [t.id, t]));
+  // Order teams by SkillCategory canonical order.
+  const sortedTeams = [...teams].sort((a, b) => {
+    const ai = SKILL_CATEGORY_ORDER.indexOf(a.category ?? "general");
+    const bi = SKILL_CATEGORY_ORDER.indexOf(b.category ?? "general");
+    return ai - bi;
+  });
+
+  return (
+    <div style={{ display: "flex", gap: 10, overflowX: "auto", padding: "8px 0 12px", marginBottom: 6 }}>
+      {sortedTeams.map((team) => {
+        const runs = runsByTeam.get(team.id) ?? [];
+        const isActive = runs.length > 0;
+        return (
+          <div
+            key={team.id}
+            style={{
+              flex: "0 0 220px",
+              minHeight: 96,
+              border: `1px solid ${isActive ? "var(--accent)" : "var(--border)"}`,
+              borderRadius: 8,
+              background: isActive ? "rgba(124, 92, 255, 0.06)" : "var(--bg-elev)",
+              padding: 10,
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+              <b style={{ fontSize: 12 }}>{team.name}</b>
+              <span style={{ fontSize: 10, color: "var(--text-dim)" }}>
+                {team.category ? SKILL_CATEGORY_LABEL[team.category] : ""}
+              </span>
+            </div>
+            {!isActive && (
+              <div style={{ color: "var(--text-dim)", fontSize: 11, fontStyle: "italic" }}>idle</div>
+            )}
+            {runs.map((r) => {
+              const ticket = ticketById.get(r.ticket_id);
+              return (
+                <div
+                  key={r.run_id}
+                  onClick={() => ticket && onCardClick(ticket)}
+                  style={{
+                    fontSize: 11, padding: "4px 6px", marginBottom: 4,
+                    background: "var(--bg)", borderRadius: 4,
+                    border: "1px solid var(--border)",
+                    cursor: "pointer",
+                    display: "flex", alignItems: "center", gap: 6,
+                  }}
+                  title={r.ticket_title}
+                >
+                  <span style={{
+                    display: "inline-block", width: 6, height: 6, borderRadius: "50%",
+                    background: "var(--accent)", animation: "pulse 1.4s ease-out infinite",
+                  }} />
+                  <span style={{ fontWeight: 600, color: "var(--accent)" }}>{r.ticket_key ?? r.ticket_id.slice(0, 6)}</span>
+                  <span style={{ color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {r.ticket_title.slice(0, 32)}{r.ticket_title.length > 32 ? "…" : ""}
+                  </span>
+                </div>
+              );
+            })}
+            <div style={{ marginTop: 4, fontSize: 10, color: "var(--text-dim)" }}>
+              {team.agent_names.length} member{team.agent_names.length === 1 ? "" : "s"}
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }

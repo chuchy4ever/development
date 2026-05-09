@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { Run } from "@ceo/shared";
 import { api, streamRunEvents } from "../api";
@@ -13,6 +13,28 @@ interface UiEvent {
   ts: string;
   type: string;
   payload: any;
+}
+
+/** Event filter buckets — broad categories the user can show/hide. */
+type FilterKey = "director" | "tools" | "phases" | "system" | "errors" | "diffs";
+
+const FILTER_LABELS: Record<FilterKey, string> = {
+  director: "🎬 Director",
+  tools: "🔧 Tools",
+  phases: "▶ Phases",
+  system: "ℹ System",
+  errors: "❗ Errors",
+  diffs: "📝 Diffs",
+};
+
+function classifyEvent(type: string): FilterKey | null {
+  if (type.startsWith("director_")) return "director";
+  if (type === "claude_stream") return "tools";
+  if (type === "phase_start" || type === "phase_end" || type === "command_start" || type === "command_output" || type === "command_end" || type === "awaiting_approval") return "phases";
+  if (type === "stderr") return "errors";
+  if (type === "diff") return "diffs";
+  if (type === "system" || type === "stdout" || type === "done") return "system";
+  return null;
 }
 
 export function RunView({ runId, onClose }: Props) {
@@ -252,6 +274,8 @@ export function RunView({ runId, onClose }: Props) {
           </div>
         )}
 
+        {events.length > 0 && <TeamFlowHeader events={events} />}
+
         <div className="tabs" style={{ marginTop: 12, paddingLeft: 0 }}>
           <div
             className={`tab ${activeTab === "log" ? "active" : ""}`}
@@ -265,6 +289,24 @@ export function RunView({ runId, onClose }: Props) {
           >
             Diff ({diffs.length})
           </div>
+          <div style={{ flex: 1 }} />
+          {activeTab === "log" && events.length > 0 && (
+            <button
+              onClick={() => {
+                const blob = new Blob([JSON.stringify(events, null, 2)], { type: "application/json" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `run-${runId}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+              }}
+              title="Download all events as JSON for debug"
+              style={{ marginRight: 8, alignSelf: "center", fontSize: 11 }}
+            >
+              ⬇ Export log
+            </button>
+          )}
         </div>
 
         <div style={{ flex: 1, overflow: "auto", padding: "12px 0", minHeight: 0 }}>
@@ -281,11 +323,169 @@ export function RunView({ runId, onClose }: Props) {
 }
 
 function LogView({ events }: { events: UiEvent[] }) {
+  const [filters, setFilters] = useState<Record<FilterKey, boolean>>({
+    director: true,
+    tools: false,    // claude_stream is noisy by default
+    phases: true,
+    system: true,
+    errors: true,
+    diffs: true,
+  });
+  // Count by category for chip badges
+  const counts = useMemo(() => {
+    const c: Record<FilterKey, number> = { director: 0, tools: 0, phases: 0, system: 0, errors: 0, diffs: 0 };
+    for (const e of events) {
+      const k = classifyEvent(e.type);
+      if (k) c[k]++;
+    }
+    return c;
+  }, [events]);
+  const filtered = useMemo(
+    () => events.filter((e) => {
+      const k = classifyEvent(e.type);
+      return k ? filters[k] : true;
+    }),
+    [events, filters],
+  );
   return (
     <div style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}>
-      {events.map((ev) => (
+      <div style={{
+        position: "sticky", top: 0, zIndex: 5,
+        display: "flex", flexWrap: "wrap", gap: 6,
+        padding: "6px 0 8px",
+        background: "var(--bg)",
+        borderBottom: "1px solid var(--border)",
+        marginBottom: 6,
+      }}>
+        {(Object.keys(FILTER_LABELS) as FilterKey[]).map((k) => (
+          <button
+            key={k}
+            onClick={() => setFilters((f) => ({ ...f, [k]: !f[k] }))}
+            style={{
+              fontSize: 11, padding: "3px 10px", borderRadius: 12,
+              background: filters[k] ? "var(--accent)" : "var(--bg-elev)",
+              color: filters[k] ? "#fff" : "var(--text)",
+              border: `1px solid ${filters[k] ? "var(--accent)" : "var(--border)"}`,
+              opacity: counts[k] === 0 ? 0.45 : 1,
+            }}
+            disabled={counts[k] === 0}
+          >
+            {FILTER_LABELS[k]} <span style={{ opacity: 0.7 }}>· {counts[k]}</span>
+          </button>
+        ))}
+        <span style={{ flex: 1 }} />
+        <button
+          onClick={() => setFilters({ director: true, tools: true, phases: true, system: true, errors: true, diffs: true })}
+          style={{ fontSize: 11 }}
+        >show all</button>
+      </div>
+      {filtered.length === 0 && (
+        <div style={{ color: "var(--text-dim)", padding: 20, textAlign: "center" }}>
+          No events match the active filters.
+        </div>
+      )}
+      {filtered.map((ev) => (
         <EventRow key={ev.id} ev={ev} />
       ))}
+    </div>
+  );
+}
+
+/**
+ * Team Flow header — visualizes the path Director took through the playbook
+ * as a horizontal sequence of chips, color-coded by sub-agent role. Compact
+ * summary so the user can see "where we are" without scrolling the log.
+ */
+function TeamFlowHeader({ events }: { events: UiEvent[] }) {
+  // Build a sequence of director_decision + dispatch + done events.
+  type Step = {
+    iter: number;
+    action: string;
+    label: string;
+    role: string;
+    cost: number;
+    ok: boolean | null | undefined;
+    inProgress: boolean;
+  };
+  const steps: Step[] = [];
+  let lastIter = 0;
+  for (const e of events) {
+    const p = e.payload || {};
+    if (e.type === "director_decision") {
+      lastIter = p.iteration ?? lastIter + 1;
+      const a = p.action ?? {};
+      const action = a.action ?? "?";
+      let label = action;
+      if (action === "dispatch") label = a.subagent ?? "agent";
+      else if (action === "run_playbook_phase") label = a.phase_id ?? "phase";
+      else if (action === "use_playbook") label = `📖 ${a.playbook ?? "playbook"}`;
+      else if (action === "run_ci_gate") label = "ci_gate";
+      else if (action === "mark_done") label = "✓ done";
+      else if (action === "give_up") label = "✗ give_up";
+      else if (action === "request_decompose") label = "↯ decompose";
+      steps.push({ iter: lastIter, action, label, role: "?", cost: p.cost_usd ?? 0, ok: undefined, inProgress: true });
+    } else if (e.type === "director_dispatch") {
+      const last = steps[steps.length - 1];
+      if (last) {
+        last.role = p.role ?? last.role;
+        if (p.subagent === "ci_gate") last.role = "gate";
+      }
+    } else if (e.type === "director_subagent_done") {
+      const last = steps[steps.length - 1];
+      if (last) {
+        last.ok = p.ok;
+        last.cost = (last.cost ?? 0) + (p.cost_usd ?? 0);
+        last.inProgress = false;
+      }
+    } else if (e.type === "director_end") {
+      const last = steps[steps.length - 1];
+      if (last) last.inProgress = false;
+    }
+  }
+  if (steps.length === 0) return null;
+
+  const colorFor = (s: Step): string => {
+    if (s.action === "mark_done") return "#16a34a";
+    if (s.action === "give_up") return "#dc2626";
+    if (s.action === "use_playbook") return "#7c3aed";
+    if (s.role === "gate") return "#0891b2";
+    if (s.role === "coder") return "#7c5cff";
+    if (s.role === "reviewer") return "#d29922";
+    if (s.role === "tester") return "#16a34a";
+    return "#6b7280";
+  };
+
+  return (
+    <div style={{
+      display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center",
+      padding: "10px 12px", marginTop: 12,
+      border: "1px solid var(--border)", borderRadius: 8,
+      background: "var(--bg-elev)",
+    }}>
+      <span style={{ fontSize: 11, color: "var(--text-dim)", marginRight: 4 }}>FLOW:</span>
+      {steps.map((s, i) => {
+        const c = colorFor(s);
+        const okBadge = s.ok === true ? "✓" : s.ok === false ? "✗" : s.inProgress ? "⏳" : "";
+        return (
+          <span key={i} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <span style={{
+              fontSize: 11,
+              padding: "3px 8px", borderRadius: 12,
+              background: s.inProgress ? `${c}33` : `${c}22`,
+              border: `1px solid ${c}`,
+              color: c,
+              fontWeight: 600,
+              animation: s.inProgress ? "pulse 1.6s ease-in-out infinite" : undefined,
+            }}>
+              <span style={{ opacity: 0.6, marginRight: 4 }}>T{s.iter}</span>
+              {s.label}
+              {okBadge && <span style={{ marginLeft: 4 }}>{okBadge}</span>}
+              {s.cost > 0 && <span style={{ opacity: 0.7, marginLeft: 4, fontWeight: 400 }}>${s.cost.toFixed(2)}</span>}
+            </span>
+            {i < steps.length - 1 && <span style={{ color: "var(--text-dim)" }}>→</span>}
+          </span>
+        );
+      })}
     </div>
   );
 }
