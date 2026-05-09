@@ -277,6 +277,25 @@ export interface TemplatePhase {
   position?: { x: number; y: number } | null;
 }
 
+/** Team bundled in a template. agent_names reference Agent.name within the
+ *  preset's agents[] (or already-present project agents). On apply, missing
+ *  agent references are silently dropped. */
+export interface TemplateTeam {
+  id: string;
+  name: string;
+  description?: string;
+  category?: SkillCategory;
+  agent_names: string[];
+}
+
+/** Playbook bundled in a template. Step phase_ids must match TemplatePhase.id
+ *  values from the same preset (or already-present project phases). */
+export interface TemplatePlaybook {
+  name: string;
+  description: string;
+  steps: PlaybookStep[];
+}
+
 export interface WorkflowPreset {
   key: string;                  // stable identifier
   name: string;
@@ -286,6 +305,12 @@ export interface WorkflowPreset {
   /** Agents this template needs. On apply, missing ones are inserted; existing ones are left alone. */
   agents: AgentBundleEntry[];
   phases: TemplatePhase[];
+  /** Teams bundled with the template (optional — older templates omit this). */
+  teams?: TemplateTeam[];
+  /** Named Playbooks bundled with the template (optional). */
+  playbooks?: TemplatePlaybook[];
+  /** Director config defaults bundled with the template (optional). */
+  director_config?: DirectorConfig | null;
   project_specifics?: string | null;
   created_at?: string;
   updated_at?: string;
@@ -295,6 +320,8 @@ export interface ApplyTemplateResult {
   agents_added: number;
   agents_existing: number;
   phases: number;
+  teams_added?: number;
+  playbooks_added?: number;
 }
 
 /** Category groups skills/gates by what they DO, independent of execution order.

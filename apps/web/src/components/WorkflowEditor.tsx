@@ -2354,7 +2354,12 @@ function TemplatePickerModal({ projectId, onClose, onApplied }: TemplatePickerMo
     setErr(null);
     try {
       const r = await api.applyWorkflowPreset(projectId, key);
-      alert(`Applied: +${r.agents_added} agent(s), ${r.agents_existing} kept, ${r.phases} phases.`);
+      alert(
+        `Applied: +${r.agents_added} agent(s), ${r.agents_existing} kept, ${r.phases} phases` +
+        (r.teams_added ? `, +${r.teams_added} team(s)` : "") +
+        (r.playbooks_added ? `, +${r.playbooks_added} playbook(s)` : "") +
+        ".",
+      );
       await onApplied();
     } catch (e: any) {
       setErr(e.message);
