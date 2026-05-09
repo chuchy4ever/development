@@ -273,6 +273,7 @@ export function RunView({ runId, onClose }: Props) {
         )}
 
         {events.length > 0 && <TeamFlowHeader events={events} />}
+        {events.length > 0 && <AgentBreakdown events={events} />}
 
         <div className="tabs" style={{ marginTop: 12, paddingLeft: 0 }}>
           <div
@@ -390,6 +391,134 @@ function LogView({ events }: { events: UiEvent[] }) {
 }
 
 /**
+ * AgentBreakdown — aggregates director_dispatch + director_subagent_done
+ * events into per-agent stats: dispatches, total cost, total wall time,
+ * ok/fail counts, commits added. Shows bounces (>1 dispatch) prominently —
+ * those are usually the interesting "where did we get stuck" signal.
+ */
+function AgentBreakdown({ events }: { events: UiEvent[] }) {
+  type Stat = {
+    name: string;
+    role: string;
+    model: string | null;
+    dispatches: number;
+    cost_usd: number;
+    duration_ms: number;
+    ok: number;
+    fail: number;
+    null_count: number;
+    commits: number;
+    pending: { startedAt: number } | null;
+  };
+  const byAgent = new Map<string, Stat>();
+  for (const e of events) {
+    const p = e.payload || {};
+    const ts = new Date(e.ts).getTime();
+    if (e.type === "director_dispatch") {
+      const name = String(p.subagent ?? "?");
+      let s = byAgent.get(name);
+      if (!s) {
+        s = { name, role: p.role ?? "", model: p.model ?? null, dispatches: 0, cost_usd: 0, duration_ms: 0, ok: 0, fail: 0, null_count: 0, commits: 0, pending: null };
+        byAgent.set(name, s);
+      }
+      s.dispatches++;
+      s.pending = { startedAt: ts };
+    } else if (e.type === "director_subagent_done") {
+      const name = String(p.subagent ?? "?");
+      const s = byAgent.get(name);
+      if (!s) continue;
+      if (p.ok === true) s.ok++;
+      else if (p.ok === false) s.fail++;
+      else s.null_count++;
+      if (typeof p.cost_usd === "number") s.cost_usd += p.cost_usd;
+      if (typeof p.commits_added === "number") s.commits += p.commits_added;
+      if (s.pending) s.duration_ms += ts - s.pending.startedAt;
+      s.pending = null;
+    }
+  }
+  const stats = Array.from(byAgent.values()).sort((a, b) => b.cost_usd - a.cost_usd);
+  if (stats.length === 0) return null;
+  const totalCost = stats.reduce((sum, s) => sum + s.cost_usd, 0);
+
+  return (
+    <div style={{
+      marginTop: 10, padding: 12,
+      border: "1px solid var(--border)", borderRadius: 8,
+      background: "var(--bg-elev)",
+    }}>
+      <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>
+        AGENT BREAKDOWN · {stats.length} agent{stats.length === 1 ? "" : "s"} · ${totalCost.toFixed(2)} total
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        {stats.map((s) => {
+          const share = totalCost > 0 ? (s.cost_usd / totalCost) : 0;
+          const okFail = s.ok + s.fail;
+          const bounce = s.dispatches > 1;
+          return (
+            <div key={s.name} style={{
+              display: "grid",
+              gridTemplateColumns: "1.5fr 60px 80px 70px 80px 80px",
+              gap: 8,
+              alignItems: "center",
+              fontSize: 12,
+              padding: "4px 6px",
+              borderRadius: 4,
+              background: bounce ? "rgba(245, 158, 11, 0.07)" : "transparent",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                <span style={{
+                  display: "inline-block", width: 8, height: 8, borderRadius: "50%",
+                  background: s.role === "coder" ? "#7c5cff" : s.role === "reviewer" ? "#d29922" : s.role === "tester" ? "#16a34a" : s.role === "" ? "#0891b2" : "#6b7280",
+                  flex: "0 0 auto",
+                }} />
+                <b style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</b>
+                {s.model && <span style={{ color: "var(--text-dim)", fontSize: 10 }}>· {s.model.split("-").slice(1, 3).join("-")}</span>}
+              </div>
+              <span title="dispatches" style={{ textAlign: "right" }}>
+                {bounce && <span style={{ color: "var(--yellow)", marginRight: 2 }}>↻</span>}
+                {s.dispatches}× <span style={{ color: "var(--text-dim)", fontSize: 10 }}>{bounce ? "bounce" : "call"}</span>
+              </span>
+              <span title="ok/fail/no-verdict" style={{ textAlign: "right", fontSize: 11 }}>
+                {okFail > 0 || s.null_count > 0 ? (
+                  <>
+                    {s.ok > 0 && <span style={{ color: "var(--green)" }}>✓{s.ok}</span>}
+                    {s.fail > 0 && <span style={{ color: "var(--red)", marginLeft: 4 }}>✗{s.fail}</span>}
+                    {s.null_count > 0 && <span style={{ color: "var(--text-dim)", marginLeft: 4 }}>?{s.null_count}</span>}
+                  </>
+                ) : <span style={{ color: "var(--text-dim)" }}>—</span>}
+              </span>
+              <span title="commits added" style={{ textAlign: "right", color: "var(--text-dim)", fontSize: 11 }}>
+                {s.commits > 0 ? `+${s.commits}` : "—"}
+              </span>
+              <span title="wall time" style={{ textAlign: "right", color: "var(--text-dim)", fontSize: 11 }}>
+                {fmtDuration(s.duration_ms) || "—"}
+              </span>
+              <span title="cost" style={{ textAlign: "right", display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6 }}>
+                <span style={{
+                  display: "inline-block", width: 40, height: 4, background: "var(--gray-soft)", borderRadius: 2, overflow: "hidden",
+                }}>
+                  <span style={{ display: "block", width: `${(share * 100).toFixed(0)}%`, height: "100%", background: "#7c5cff" }} />
+                </span>
+                ${s.cost_usd.toFixed(2)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function fmtDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return r === 0 ? `${m}m` : `${m}m${r}s`;
+}
+
+/**
  * Team Flow header — visualizes the path Director took through the playbook
  * as a horizontal sequence of chips, color-coded by sub-agent role. Compact
  * summary so the user can see "where we are" without scrolling the log.
@@ -402,6 +531,8 @@ function TeamFlowHeader({ events }: { events: UiEvent[] }) {
     label: string;
     role: string;
     cost: number;
+    duration_ms: number;
+    startedAt: number | null;
     ok: boolean | null | undefined;
     inProgress: boolean;
   };
@@ -409,6 +540,7 @@ function TeamFlowHeader({ events }: { events: UiEvent[] }) {
   let lastIter = 0;
   for (const e of events) {
     const p = e.payload || {};
+    const ts = new Date(e.ts).getTime();
     if (e.type === "director_decision") {
       lastIter = p.iteration ?? lastIter + 1;
       const a = p.action ?? {};
@@ -421,12 +553,13 @@ function TeamFlowHeader({ events }: { events: UiEvent[] }) {
       else if (action === "mark_done") label = "✓ done";
       else if (action === "give_up") label = "✗ give_up";
       else if (action === "request_decompose") label = "↯ decompose";
-      steps.push({ iter: lastIter, action, label, role: "?", cost: p.cost_usd ?? 0, ok: undefined, inProgress: true });
+      steps.push({ iter: lastIter, action, label, role: "?", cost: p.cost_usd ?? 0, duration_ms: 0, startedAt: ts, ok: undefined, inProgress: true });
     } else if (e.type === "director_dispatch") {
       const last = steps[steps.length - 1];
       if (last) {
         last.role = p.role ?? last.role;
         if (p.subagent === "ci_gate") last.role = "gate";
+        last.startedAt = ts;
       }
     } else if (e.type === "director_subagent_done") {
       const last = steps[steps.length - 1];
@@ -434,6 +567,7 @@ function TeamFlowHeader({ events }: { events: UiEvent[] }) {
         last.ok = p.ok;
         last.cost = (last.cost ?? 0) + (p.cost_usd ?? 0);
         last.inProgress = false;
+        if (last.startedAt) last.duration_ms = ts - last.startedAt;
       }
     } else if (e.type === "director_end") {
       const last = steps[steps.length - 1];
@@ -479,6 +613,7 @@ function TeamFlowHeader({ events }: { events: UiEvent[] }) {
               {s.label}
               {okBadge && <span style={{ marginLeft: 4 }}>{okBadge}</span>}
               {s.cost > 0 && <span style={{ opacity: 0.7, marginLeft: 4, fontWeight: 400 }}>${s.cost.toFixed(2)}</span>}
+              {s.duration_ms > 0 && <span style={{ opacity: 0.55, marginLeft: 4, fontWeight: 400 }}>· {fmtDuration(s.duration_ms)}</span>}
             </span>
             {i < steps.length - 1 && <span style={{ color: "var(--text-dim)" }}>→</span>}
           </span>
