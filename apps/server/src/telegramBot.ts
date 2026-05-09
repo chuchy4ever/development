@@ -63,13 +63,28 @@ async function tg<T = unknown>(method: string, body?: Record<string, unknown>): 
 }
 
 async function sendMessage(chatId: number, text: string, replyTo?: number): Promise<TgMessage> {
-  return tg<TgMessage>("sendMessage", {
-    chat_id: chatId,
-    text,
-    parse_mode: "Markdown",
-    reply_to_message_id: replyTo,
-    disable_web_page_preview: true,
-  });
+  // Try Markdown first (most messages use bold / italic / code formatting).
+  // If Telegram rejects the entities (unbalanced underscores in user-supplied
+  // content like errors / IDs / agent prompts), fall back to plain text so
+  // the message still gets delivered. This used to drop entire replies.
+  try {
+    return await tg<TgMessage>("sendMessage", {
+      chat_id: chatId,
+      text,
+      parse_mode: "Markdown",
+      reply_to_message_id: replyTo,
+      disable_web_page_preview: true,
+    });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!/can't parse entities/i.test(msg)) throw e;
+    return tg<TgMessage>("sendMessage", {
+      chat_id: chatId,
+      text,
+      reply_to_message_id: replyTo,
+      disable_web_page_preview: true,
+    });
+  }
 }
 
 function isAllowed(userId: number | undefined): boolean {
