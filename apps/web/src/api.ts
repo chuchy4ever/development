@@ -98,6 +98,19 @@ export const api = {
   getRun: (runId: string) => req<Run>(`/api/runs/${runId}`),
   listActiveRuns: (projectId: string) =>
     req<ActiveRunSummary[]>(`/api/projects/${projectId}/active-runs`),
+  getProjectStats: (projectId: string) =>
+    req<{
+      runs_total: number;
+      runs_by_status: Record<string, number>;
+      total_cost_usd: number;
+      today_cost_usd: number;
+      last_7_days_cost_usd: number;
+      total_runtime_ms: number;
+      avg_cost_per_run_usd: number;
+      tickets_by_status: Record<string, number>;
+      tickets_total: number;
+      estimated_saved_hours: number;
+    }>(`/api/projects/${projectId}/stats`),
   listTicketRuns: (ticketId: string) =>
     req<Run[]>(`/api/tickets/${ticketId}/runs`),
   listRunEvents: (runId: string, since = 0) =>
