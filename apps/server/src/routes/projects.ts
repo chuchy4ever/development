@@ -184,6 +184,17 @@ projectsRouter.put("/:id/workflow", (req, res) => {
       if (p.approval && p.approval.message !== undefined && p.approval.message !== null && typeof p.approval.message !== "string") {
         return res.status(400).json({ error: `approval phase "${p.id}" message must be a string` });
       }
+    } else if (p.kind === "director") {
+      // Director phase config is optional. All fields have defaults.
+      if (p.director && typeof p.director !== "object") {
+        return res.status(400).json({ error: `director phase "${p.id}" config must be an object` });
+      }
+      if (p.director?.max_iterations !== undefined && (typeof p.director.max_iterations !== "number" || p.director.max_iterations <= 0)) {
+        return res.status(400).json({ error: `director phase "${p.id}" max_iterations must be positive` });
+      }
+      if (p.director?.budget_usd !== undefined && (typeof p.director.budget_usd !== "number" || p.director.budget_usd <= 0)) {
+        return res.status(400).json({ error: `director phase "${p.id}" budget_usd must be positive` });
+      }
     } else {
       if (!p.agent_id || !agentIds.has(p.agent_id)) {
         return res.status(400).json({

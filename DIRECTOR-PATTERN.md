@@ -1,278 +1,129 @@
-# Director pattern — design notes
+# Director pattern — implementation
 
-This branch (`director-pattern`) sketches the Claude-Code-style "top agent
-orchestrates sub-agents" architecture as an alternative to the static workflow
-in `main`. **This is a design + skeleton — not a working implementation.**
+This branch (`director-pattern`) implements Claude-Code-style "top agent
+orchestrates sub-agents" architecture as an alternative to the static workflow.
 
-## TL;DR
+**Status: working implementation, but not yet A/B tested vs static workflow.**
+Use it on a project, compare cost / success rate, decide whether to merge.
 
-```
-Static workflow (main):                Director pattern (this branch):
-                                       
-  engine → tech_lead → architect       engine → director_phase
-       → junior → senior →                  └→ director (Claude)
-       → reviewer → ci_gate →                  uses tools:
-       → tester → closer                         · dispatch_junior(notes)
-                                                  · dispatch_senior(notes)
-  Cesta předem daná, retry budget         · request_review()
-  fixed in workflow.                          · run_ci_gate()
-                                              · recommend_decompose()
-  Engine = orchestrator.                      · mark_done()
-                                              · give_up(reason)
-                                       
-                                       Director rozhoduje on-the-fly.
-                                       Engine = runtime + budget guard.
-```
+## What got built
 
-## Why consider this
+| Layer | File | Status |
+|---|---|---|
+| Phase kind union | `packages/shared/src/index.ts` | ✅ `kind: "director"` + `DirectorConfig` |
+| Engine integration | `apps/server/src/runs.ts` | ✅ branches on `kind === "director"`, treats as terminal |
+| Director core | `apps/server/src/director.ts` | ✅ `runDirectorPhase`, `callDirector`, `dispatchSubagent`, `runCiGate` |
+| Validator | `apps/server/src/routes/projects.ts` | ✅ accepts director config in PUT /workflow |
+| RunView timeline | `apps/web/src/components/RunView.tsx` | ✅ `director_*` events render with rationale, dispatch chain, cost per turn |
+| Workflow editor | `apps/web/src/components/WorkflowEditor.tsx` | ✅ `+ Add director` palette, side-panel form (budget, iterations, project brief, sub-agent allowlist) |
 
-**Statický workflow (current) has fundamental limits**:
-- Hard-coded retry counts (`max_attempts: 4`) — no concept of "give Junior one more shot, but with much more context" vs "escalate to architect".
-- Can't pivot strategy mid-run. If `ci_gate` keeps failing for the same reason, retry loop just repeats with same prompt.
-- Workflow editor is per-project; new patterns require new graphs.
+Everything compiles. Server typecheck and web typecheck both clean on this branch.
 
-**Director adapts**:
-- After Senior bounces twice with same root cause, Director can decide "Junior won't fix this; let me dispatch Senior with surgical instructions" or "this is architectural, re-plan first".
-- For pure-infra tickets, Director skips Architect entirely.
-- For tickets with cross-cutting concerns, Director can interleave: Junior writes code → Senior reviews → Junior writes more — without the static graph forcing Reviewer in between.
+## How it works
 
-**Cost trade-off** (numbers from real Agarden runs today):
-- Static avg per ticket: $4-9 (simple) / $8-25 (complex with retries)
-- Director estimate: $5-12 (simple — overhead) / $5-15 (complex — saved by smart routing)
-- Failure rate: static ~30% → director estimated ~10-15%
-- One-time engineering cost: ~4 days
+1. Workflow editor: add a Director phase. It's terminal — no `next`, no
+   `retry_target`. The whole graph collapses into one phase.
+2. Run starts, engine sees `kind === "director"`, calls `runDirectorPhase`.
+3. Director (Claude Sonnet) gets ticket + budget + sub-agent allowlist. Each
+   turn it emits a JSON decision:
+   ```
+   {
+     "rationale": "...",
+     "action": { "action": "dispatch", "subagent": "PHP Junior Coder", "notes": "..." }
+   }
+   ```
+   or `run_ci_gate`, `request_decompose`, `mark_done`, `give_up`.
+4. Engine executes the action (dispatching real sub-agents using existing
+   `runAgent` machinery, or running ci_gate via the existing `runTask` shell
+   infra), captures cost + diff stats, and feeds the result back to Director.
+5. Director decides next turn. Loop until terminal action or budget/iterations.
 
-**When NOT to switch**:
-- Tickets are mostly simple, single-phase fixes — overhead doesn't pay off.
-- You value debuggability ("why did engine choose X?") over adaptiveness.
-- Rate of new project types is low — workflow editor + templates suffice.
+## Cost capture
 
-## Design
+Director and each sub-agent return `total_cost_usd` from their stream-json
+result event. Engine accumulates and emits `director_decision` /
+`director_subagent_done` events with cost. Hard cap at `budget_usd`.
 
-### Phase kind = "director"
+## Compared to the original skeleton (in the previous commit on this branch)
 
-In shared types:
+The skeleton had stubs for cost, diffs, and ci_gate. This commit fills them
+in:
+- Real Claude CLI calls via `streamClaude` with stream-json parsing for cost.
+- Real sub-agent dispatch via `runAgent` + `specFromAgent` (same machinery
+  as the static workflow uses for Junior/Senior/Reviewer/etc).
+- Real ci_gate via `runTask("shell", …)` reusing the existing task registry.
+- Real decompose via `decomposeTicket(...)` reusing the CTO infrastructure.
+- Commit-counting between dispatches (so Director knows "Junior added 2
+  commits last turn").
 
-```ts
-interface DirectorConfig {
-  /** System prompt addendum specific to this project (style, conventions). */
-  project_brief?: string;
-  /** Maximum sub-agent dispatches in one run. Hard guard against runaway. */
-  max_iterations?: number;        // default 12
-  /** Hard budget cap (USD). Director gets warned at 80%, hard-stop at 100%. */
-  budget_usd?: number;            // default 8
-  /** Which sub-agents Director can dispatch by name (must exist as project agents). */
-  available_subagents?: string[]; // default: all coder/reviewer/tester roles
-}
+## What's NOT done
 
-interface WorkflowPhase {
-  kind?: "agent" | "task" | "director" | ...;
-  director?: DirectorConfig;
-  // ...
-}
-```
+- A/B benchmark vs static workflow on identical tickets (key validation step
+  before deciding to merge).
+- Project brief is in the side panel but probably needs project-level
+  fallback (DirectorConfig project_brief vs project.spec_md).
+- Sub-agent dispatch doesn't yet stream tokens to RunView in real time —
+  only the verdict at the end shows up. Could be improved with onLine
+  forwarding to a per-subagent SSE channel.
+- Director doesn't have a "ask user" tool. For human-in-the-loop, the user
+  has to use approval phases in static workflow OR Director has to give_up
+  with a question in the reason.
+- No "remember across runs" Director memory yet (the Memory Curator infra
+  exists but isn't wired to Director's history).
 
-A workflow can have ONE director phase replacing the entire downstream graph,
-or directors can chain (rare). Typical setup:
+## Migration / coexistence
 
-```
-[entry] director_main [end]
-```
+Static workflow and Director can **coexist**: a project's workflow can have
+Director as one phase or be entirely Director-based. The engine handles
+both. Recommend:
+1. Keep your existing static workflow on a project.
+2. Add a second project (or duplicate the existing one) with a Director-only
+   workflow.
+3. Run the same ticket on both, compare cost / success / wall-time.
+4. After 5-10 tickets, decide.
 
-Director phase has no `next` (Director itself decides terminate).
+## How to switch a project to Director mode
 
-### Director system prompt (sketch)
+Replace the entire `workflow.phases` array with one director phase:
 
-```
-You are a Director — the lead orchestrator for ticket #{ticket_key}.
-
-You CANNOT write code yourself. You operate by dispatching sub-agents:
-
-Available sub-agents (call as JSON tool):
-- dispatch_junior(notes) — Junior PHP coder. Cheap (Haiku). Bulk implementation. Use for routine work.
-- dispatch_senior(notes) — Senior PHP coder. Expensive (Opus). Quality + architectural fixes. Use after Junior or for tricky problems.
-- dispatch_reviewer() — Code reviewer. Reads diff, returns issue list. No code writes.
-- dispatch_devops(notes) — Infrastructure / Docker / CI agent. Pure infra work.
-- request_decompose(reason) — Hand ticket to CTO for splitting into subtickets. Run ends.
-- run_ci_gate() — Run composer ci in Docker. Returns pass/fail + tail output.
-- mark_done(summary) — All acceptance criteria met. Run ends as succeeded.
-- give_up(reason) — Stuck / blocked. Run ends as failed. Use sparingly.
-
-Each turn:
-1. Reflect on what's been done (history below) and what's left (acceptance criteria).
-2. Decide ONE action (call exactly one tool).
-3. Wait for the result and decide next.
-
-Rules of thumb:
-- Start cheap (Junior + Reviewer cycle). Escalate to Senior only when Junior bounces twice OR review surfaces architectural issues.
-- After ANY meaningful diff, call request_decompose(...) IF you realize the ticket
-  is actually multiple unrelated concerns.
-- Never dispatch the same sub-agent more than 4 times total in one run.
-- run_ci_gate() before mark_done(); if ci_gate fails, dispatch the right sub-agent
-  to fix and retry — but if you've already retried twice, call give_up.
-
-Your replies are JSON only:
+```json
 {
-  "rationale": "<1-2 sentences why this action>",
-  "action": "dispatch_junior" | "dispatch_senior" | ...,
-  "args": { "notes": "...", "summary": "...", etc. }
+  "phases": [
+    {
+      "id": "director",
+      "kind": "director",
+      "director": {
+        "budget_usd": 10,
+        "max_iterations": 12,
+        "project_brief": "PHP project, FrankenPHP, composer ci runs in Docker. ...",
+        "available_subagents": ["PHP Junior Coder", "PHP Senior Coder", "Reviewer", "DevOps Engineer", "Tester"]
+      },
+      "next": null
+    }
+  ],
+  "project_specifics": "..."
 }
 ```
 
-### Engine integration
+Or use the workflow editor: + Add → 🎬 Director, then delete other phases.
 
-`apps/server/src/director.ts`:
+## Testing
 
-```ts
-export async function runDirectorPhase(args: {
-  runId: string;
-  project: ProjectWithRepos;
-  ticket: Ticket;
-  phase: WorkflowPhase;
-  worktrees: Worktree[];
-  cwd: string;
-  emit: (event: string, payload: any) => void;
-}): Promise<{ ok: boolean; summary: string; iterations: number }> {
-  const cfg = args.phase.director ?? {};
-  const maxIter = cfg.max_iterations ?? 12;
-  const budgetUsd = cfg.budget_usd ?? 8;
+End-to-end smoke test: take a small ticket (e.g. "add /version endpoint"),
+duplicate the project, swap workflow to Director-only, run, compare to
+static workflow result.
 
-  let iter = 0;
-  let totalCost = 0;
-  const history: TurnRecord[] = [];
+If Director costs <30% more on simple tickets but recovers gracefully where
+static dies (ci_gate hang, retry exhaustion), it's a win.
 
-  while (iter < maxIter && totalCost < budgetUsd) {
-    iter++;
-    
-    // 1. Director call: "what's next?"
-    const decision = await callDirector(args, history, totalCost);
-    totalCost += decision.cost;
+## Open questions
 
-    if (decision.action === "mark_done") {
-      return { ok: true, summary: decision.args.summary, iterations: iter };
-    }
-    if (decision.action === "give_up") {
-      return { ok: false, summary: decision.args.reason, iterations: iter };
-    }
-    if (decision.action === "request_decompose") {
-      // Trigger CTO decompose flow (existing infra)
-      await decomposeTicket(...);
-      return { ok: true, summary: "decomposed", iterations: iter };
-    }
-
-    // 2. Dispatch sub-agent
-    const result = await dispatchSubagent(args, decision);
-    totalCost += result.cost;
-
-    history.push({ decision, result });
-  }
-
-  return { ok: false, summary: "max iterations / budget reached", iterations: iter };
-}
-```
-
-`runs.ts` gets a new branch:
-
-```ts
-if (phase.kind === "director") {
-  const r = await runDirectorPhase({...});
-  emit phase_end with verdict { ok, summary }
-  // No retry_target on director — Director handles its own retries internally
-  break;  // director phase is terminal
-}
-```
-
-### Sub-agent dispatch reuses existing infra
-
-`dispatchSubagent` is essentially a wrapper around `runAgent` (existing in
-`agents.ts`). It picks the right `AgentSpec` from the project's agents based on
-the action name (`dispatch_junior` → "PHP Junior Coder", `dispatch_senior` →
-"PHP Senior Coder", etc.).
-
-The sub-agent gets:
-- The ticket
-- The Director's `notes` as `phaseNotes`
-- Current diff
-- Episodic memory (recent runs)
-- All the same context as in static workflow
-
-Result back to Director:
-- verdict (ok / issues / summary)
-- diff_summary (files changed, line counts)
-- exit_code
-- error if any
-
-### Observability
-
-Each Director iteration emits:
-- `director_decision` event (rationale + action)
-- `director_dispatch` event (sub-agent invoked)
-- Sub-agent itself emits `phase_start` / `phase_end` like in static workflow
-
-UI in `RunView` shows a chronological timeline:
-```
-[Director] reflecting…
-  → dispatch_junior(notes: "add /version endpoint")
-[Junior] running…
-  ← ok=null, 1 commit
-[Director] thinking…
-  → request_review()
-[Reviewer] running…
-  ← ok=true
-[Director] reflecting…
-  → run_ci_gate()
-[ci_gate] running…
-  ← ok=true
-[Director] mark_done("acceptance met, all green")
-✅ DONE
-```
-
-### Hybrid: best of both
-
-The cleanest design: **director phase replaces the middle of the workflow,
-not the entire thing**. So:
-
-```
-tech_lead → director_main → closer
-```
-
-Tech Lead still does initial classification (cheap, Sonnet, $0.20). If
-Tech Lead says "decompose", existing flow runs. If Tech Lead says "do it",
-hand to Director. Closer at end is symbolic handover.
-
-This bounds Director's role to actual work-getting-done, with cheap
-gates around it.
-
-## What's in this branch
-
-- `DIRECTOR-PATTERN.md` (this file)
-- `apps/server/src/director.ts` — skeleton (not working — has TODOs)
-- shared types: extension for `kind: "director"` + `DirectorConfig`
-
-## What's NOT in this branch
-
-- Engine integration (runs.ts branch)
-- UI changes (RunView timeline)
-- Validation (PUT /workflow accepting director phases)
-- Tests
-- Migration guide for existing workflows
-
-## Next steps to make it real
-
-1. Wire `runDirectorPhase` into `runs.ts` engine loop (replace existing phase branches when kind="director").
-2. Implement `dispatchSubagent` reusing `runAgent` from agents.ts.
-3. Implement `callDirector` — single Claude call with structured JSON output schema. Prompt-engineer the system prompt iteratively against real tickets.
-4. UI: Director timeline component in RunView.
-5. Migrate one project to director mode side-by-side with static workflow on another. A/B test on identical tickets to validate cost/quality claims.
-6. Once stable, deprecate static workflow OR keep as opt-in (fast path for trivial tickets).
-
-## Honest assessment
-
-This pattern **is real engineering work**. The skeleton in this branch is
-maybe 10% of the total. Don't merge to main until you've:
-- Run 10+ real tickets through Director
-- Compared cost/success vs. static workflow on the same tickets
-- Built the UI timeline (without it Director runs are opaque)
-
-If after 4-5 days you're not seeing clear wins, **kill the branch** and stay
-with the static workflow. It's simpler, cheaper, and battle-tested.
+- **Should Tech Lead remain as a cheap pre-Director gate?** I.e.
+  `tech_lead → director`. Tech Lead routes between {static-junior path,
+  Director, decompose} based on ticket complexity. Cheaper for trivial
+  tickets, full Director only when complex.
+- **Should sub-agents see Director's rationale?** Currently they see notes
+  only. Adding rationale could help Senior understand "I'm here because
+  Junior failed twice on bundles.php" without re-explaining.
+- **Recursion: can Director dispatch another Director?** Probably yes for
+  decomposed subtickets, but each is its own run today.

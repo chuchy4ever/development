@@ -333,6 +333,51 @@ async function executeRun(args: {
       const attempt = (attemptsByPhase.get(phase.id) ?? 0) + 1;
       attemptsByPhase.set(phase.id, attempt);
 
+      // ----- Director phase: top-level Claude agent dispatching sub-agents -----
+      // Director is a TERMINAL phase — it handles its own iteration internally
+      // and either decides mark_done / give_up / decompose, or hits its budget.
+      if (phase.kind === "director") {
+        emit(runId, "phase_start", { role: "director", phase_id: phase.id, attempt });
+        db.prepare(
+          `UPDATE runs SET agent_role = ?, current_agent_name = ?, current_phase_id = ? WHERE id = ?`,
+        ).run("director", `director:${phase.id}`, phase.id, runId);
+
+        const { runDirectorPhase } = await import("./director.js");
+        const result = await runDirectorPhase({
+          runId,
+          project,
+          ticket,
+          phase,
+          worktrees,
+          cwd,
+          emit: (event, payload) => emit(runId, event as RunEventType, payload),
+          registerCancel: (c) => cancelHandles.set(runId, c),
+          unregisterCancel: () => cancelHandles.delete(runId),
+        });
+
+        lastVerdict = {
+          ok: result.ok,
+          summary: result.summary,
+          issues: [],
+        } as unknown as ReviewVerdict;
+        lastExitCode = result.ok ? 0 : 1;
+        emit(runId, "phase_end", {
+          role: "director",
+          phase_id: phase.id,
+          attempt,
+          exit_code: lastExitCode,
+          verdict: lastVerdict,
+          iterations: result.iterations,
+          total_cost_usd: result.total_cost_usd,
+          decomposed: result.decomposed,
+        });
+
+        if (!result.ok) lastFailedVerdict = lastVerdict;
+        // Director is terminal; do not advance to phase.next.
+        phase = undefined;
+        break;
+      }
+
       // ----- Approval phase: human-in-the-loop pause -----
       if (phase.kind === "approval") {
         emit(runId, "phase_start", {

@@ -269,6 +269,7 @@ function PhaseNode({ data, selected }: NodeProps<PhaseNodeData>) {
   const taskType = getTaskKindForPhase(phase);
   const isTask = taskType !== null;
   const isApproval = phase.kind === "approval";
+  const isDirector = phase.kind === "director";
   const taskMeta = taskType ? TASK_TYPES[taskType] : null;
   const role = agent?.role ?? "coder";
 
@@ -283,26 +284,28 @@ function PhaseNode({ data, selected }: NodeProps<PhaseNodeData>) {
 
   const tooltip = active.length > 0
     ? `${active.length} active:\n` + active.map((a) => `${a.ticket_key ?? a.ticket_id.slice(0, 6)} ${a.ticket_title}`).join("\n")
+    : isDirector
+    ? `director · ${phase.id}\nbudget $${phase.director?.budget_usd ?? 8} · max ${phase.director?.max_iterations ?? 12} iter`
     : isApproval
     ? `approval · ${phase.id}\n${phase.approval?.message ?? "(no message)"}`
     : isTask
     ? `${taskType} · ${phase.id}\n${taskSummary}`
     : `${agent?.name ?? "(missing)"} · ${phase.id}`;
 
-  // Task & approval phases are valid without an agent; only flag agent phases as "missing".
-  const isMissing = !isTask && !isApproval && !agent;
+  // Task / approval / director phases are valid without an agent; only flag agent phases as "missing".
+  const isMissing = !isTask && !isApproval && !isDirector && !agent;
 
   return (
     <div className="n8n-node-wrap" title={tooltip}>
       <div
-        className={`n8n-node ${selected ? "selected" : ""} ${isMissing ? "missing" : ""} ${(isTask || isApproval) ? "command" : ""}`}
+        className={`n8n-node ${selected ? "selected" : ""} ${isMissing ? "missing" : ""} ${(isTask || isApproval || isDirector) ? "command" : ""}`}
       >
         <Handle id="in" type="target" position={Position.Left} className="n8n-handle" />
         <div
           className="n8n-node-icon"
-          style={{ background: isApproval ? "#f59e0b" : (taskMeta ? taskMeta.color : (ROLE_COLOR[role] ?? "#666")) }}
+          style={{ background: isDirector ? "#7c3aed" : isApproval ? "#f59e0b" : (taskMeta ? taskMeta.color : (ROLE_COLOR[role] ?? "#666")) }}
         >
-          {isApproval ? "⏸" : (taskMeta ? taskMeta.icon : (ROLE_GLYPH[role] ?? "?"))}
+          {isDirector ? "🎬" : isApproval ? "⏸" : (taskMeta ? taskMeta.icon : (ROLE_GLYPH[role] ?? "?"))}
         </div>
         <Handle id="out" type="source" position={Position.Right} className="n8n-handle" />
         {/* Hidden bottom handles for backward (retry) edges — they keep retries
@@ -343,7 +346,14 @@ function PhaseNode({ data, selected }: NodeProps<PhaseNodeData>) {
         )}
       </div>
       <div className="n8n-node-label">{phase.id}</div>
-      {isApproval ? (
+      {isDirector ? (
+        <div
+          className="n8n-node-sublabel"
+          style={{ fontSize: 10, opacity: 0.75, color: "#7c3aed", fontWeight: 600 }}
+        >
+          Director · ${phase.director?.budget_usd ?? 8} · {phase.director?.max_iterations ?? 12}t
+        </div>
+      ) : isApproval ? (
         <div
           className="n8n-node-sublabel"
           style={{ fontSize: 10, opacity: 0.75, color: "#92400e" }}
@@ -696,6 +706,7 @@ interface ToolbarProps {
   onAddAgent: () => void;
   onAddTask: (type: string) => void;
   onAddApproval: () => void;
+  onAddDirector: () => void;
   onAutoArrange: () => void;
   onAlignRows: () => void;
   onDistribute: () => void;
@@ -750,6 +761,10 @@ function WorkflowFloatingToolbar(props: ToolbarProps) {
               <button onClick={() => { props.onAddApproval(); setAddOpen(false); }}>
                 <span className="pop-icon" style={{ background: "#f59e0b" }}>⏸</span>
                 Approval gate
+              </button>
+              <button onClick={() => { props.onAddDirector(); setAddOpen(false); }}>
+                <span className="pop-icon" style={{ background: "#7c3aed" }}>🎬</span>
+                Director (orchestrator)
               </button>
             </div>
           )}
@@ -1019,6 +1034,26 @@ export function WorkflowEditor({ project, tickets }: Props) {
     });
   }
 
+  function addDirectorPhase() {
+    updateWf((next) => {
+      const id = `director${next.phases.length + 1}`;
+      const xs = next.phases.map((p) => p.position?.x ?? 0).concat([0]);
+      const x = Math.max(...xs) + 240;
+      const y = 120;
+      next.phases.push({
+        id,
+        kind: "director",
+        director: {
+          max_iterations: 12,
+          budget_usd: 8,
+        },
+        next: null,
+        position: { x, y },
+      });
+      setSelectedPhaseId(id);
+    });
+  }
+
   function addApprovalPhase() {
     updateWf((next) => {
       const id = `approve${next.phases.length + 1}`;
@@ -1115,6 +1150,7 @@ export function WorkflowEditor({ project, tickets }: Props) {
           onAddAgent={addPhase}
           onAddTask={addTaskPhase}
           onAddApproval={addApprovalPhase}
+          onAddDirector={addDirectorPhase}
           onAutoArrange={() => {
             const positions = autoArrange(wf!);
             updateWf((next) => {
@@ -1287,6 +1323,7 @@ export function WorkflowEditor({ project, tickets }: Props) {
                     approval: selected.approval ?? { message: "Review and approve to continue." },
                     agent_id: undefined,
                     task: undefined,
+                    director: undefined,
                     routes: null,
                     command: undefined,
                     working_dir: undefined,
@@ -1296,9 +1333,29 @@ export function WorkflowEditor({ project, tickets }: Props) {
                 >
                   Approval
                 </button>
+                <button
+                  type="button"
+                  className={selected.kind === "director" ? "primary" : ""}
+                  onClick={() => updatePhase(selected.id, {
+                    kind: "director",
+                    director: selected.director ?? { max_iterations: 12, budget_usd: 8 },
+                    agent_id: undefined,
+                    task: undefined,
+                    approval: undefined,
+                    routes: null,
+                    command: undefined,
+                    working_dir: undefined,
+                    timeout_sec: undefined,
+                  })}
+                  style={{ flex: 1 }}
+                >
+                  🎬 Director
+                </button>
               </div>
               <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
-                {selected.kind === "approval"
+                {selected.kind === "director"
+                  ? "Top-level Claude orchestrator. Dispatches sub-agents turn-by-turn until done. Replaces the rest of the workflow."
+                  : selected.kind === "approval"
                   ? "Pauses the run until you click Approve / Reject in the run view."
                   : getTaskKindForPhase(selected) !== null
                   ? "Deterministic action — no AI, no tokens. ok=true → next; ok=false → retry target."
@@ -1325,7 +1382,79 @@ export function WorkflowEditor({ project, tickets }: Props) {
                 }}
               />
             </div>
-            {selected.kind === "approval" ? (
+            {selected.kind === "director" ? (
+              <>
+                <div className="form-row">
+                  <label>budget (USD)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    step={0.5}
+                    value={selected.director?.budget_usd ?? 8}
+                    onChange={(e) => updatePhase(selected.id, {
+                      director: { ...(selected.director ?? {}), budget_usd: Number(e.target.value) },
+                    })}
+                  />
+                  <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+                    Hard cap on total Director + sub-agent cost. Run aborts when reached.
+                  </div>
+                </div>
+                <div className="form-row">
+                  <label>max iterations</label>
+                  <input
+                    type="number"
+                    min={3}
+                    max={50}
+                    value={selected.director?.max_iterations ?? 12}
+                    onChange={(e) => updatePhase(selected.id, {
+                      director: { ...(selected.director ?? {}), max_iterations: Number(e.target.value) },
+                    })}
+                  />
+                  <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+                    Director decision turns before forced abort. Each turn ≈ one sub-agent dispatch + Director think.
+                  </div>
+                </div>
+                <div className="form-row">
+                  <label>project brief (appended to Director's system prompt)</label>
+                  <textarea
+                    value={selected.director?.project_brief ?? ""}
+                    onChange={(e) => updatePhase(selected.id, {
+                      director: { ...(selected.director ?? {}), project_brief: e.target.value || null },
+                    })}
+                    rows={5}
+                    placeholder="e.g. PHP project with FrankenPHP. Tests run via composer ci in Docker. Lexik JWT for api auth, X-Internal-Token for plant-api. Default locale cs, fallback for de-DE."
+                    style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+                  />
+                </div>
+                <div className="form-row">
+                  <label>available sub-agents (comma-separated, blank = all)</label>
+                  <input
+                    value={(selected.director?.available_subagents ?? []).join(", ")}
+                    onChange={(e) => {
+                      const list = e.target.value.split(",").map((s) => s.trim()).filter(Boolean);
+                      updatePhase(selected.id, {
+                        director: { ...(selected.director ?? {}), available_subagents: list.length === 0 ? undefined : list },
+                      });
+                    }}
+                    placeholder="PHP Junior Coder, PHP Senior Coder, Reviewer, DevOps Engineer, Tester"
+                    style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+                  />
+                  <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+                    Names of project agents Director may dispatch. Empty = all (excluding CTO + Memory Curator).
+                  </div>
+                </div>
+                <div style={{
+                  marginTop: 8, padding: 8, fontSize: 11,
+                  background: "rgba(124, 58, 237, 0.08)",
+                  border: "1px solid rgba(124, 58, 237, 0.25)",
+                  borderRadius: 6,
+                  color: "#7c3aed",
+                }}>
+                  Director is a <b>terminal phase</b>. It handles its own iteration internally — no <code>next</code>, no <code>retry_target</code>. Run ends when Director calls mark_done / give_up / request_decompose, or budget/iterations exhausted.
+                </div>
+              </>
+            ) : selected.kind === "approval" ? (
               <div className="form-row">
                 <label>approval message (markdown, shown to the approver)</label>
                 <textarea

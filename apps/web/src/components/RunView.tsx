@@ -325,6 +325,67 @@ const EVENT_RENDERERS: Record<string, (payload: any) => ReactNode> = {
   ),
   phase_end: (p) => <PhaseEnd payload={p} />,
   claude_stream: (p) => <ClaudeLine payload={p} />,
+  director_start: (p) => (
+    <span style={{ color: "#7c3aed", fontWeight: 600 }}>
+      🎬 Director start — budget ${(p?.budget_usd ?? 0).toFixed?.(2) ?? p?.budget_usd}, max {p?.max_iterations} iter, sub-agents: {(p?.available_subagents ?? []).join(", ")}
+    </span>
+  ),
+  director_decision: (p) => (
+    <div>
+      <span style={{ color: "#7c3aed", fontWeight: 600 }}>
+        🧠 Turn {p?.iteration} → {p?.action?.action}
+        {p?.action?.subagent ? ` (${p.action.subagent})` : ""}
+        {" "}<span style={{ color: "var(--text-dim)", fontWeight: 400 }}>${(p?.cost_usd ?? 0).toFixed?.(3) ?? p?.cost_usd} this · ${(p?.total_cost_usd ?? 0).toFixed?.(2) ?? p?.total_cost_usd} total</span>
+      </span>
+      {p?.rationale && (
+        <div style={{ color: "var(--text-dim)", marginLeft: 12, fontStyle: "italic", marginTop: 2 }}>
+          {p.rationale}
+        </div>
+      )}
+      {p?.action?.notes && (
+        <div style={{ color: "var(--text)", marginLeft: 12, marginTop: 2, fontSize: 12, whiteSpace: "pre-wrap" }}>
+          notes: {String(p.action.notes).slice(0, 400)}
+        </div>
+      )}
+      {p?.action?.summary && (
+        <div style={{ color: "var(--green)", marginLeft: 12, marginTop: 2 }}>
+          {p.action.summary}
+        </div>
+      )}
+      {p?.action?.reason && (
+        <div style={{ color: p.action.action === "give_up" ? "var(--red)" : "var(--yellow)", marginLeft: 12, marginTop: 2 }}>
+          {p.action.reason}
+        </div>
+      )}
+    </div>
+  ),
+  director_dispatch: (p) => (
+    <span style={{ color: "#0ea5e9" }}>
+      ↳ dispatching <b>{p?.subagent}</b>{p?.role ? ` (${p.role})` : ""}{p?.model ? ` · ${p.model}` : ""}
+      {p?.notes ? `: ${String(p.notes).slice(0, 100)}` : ""}
+      {p?.command_preview ? `: ${String(p.command_preview).slice(0, 80)}` : ""}
+    </span>
+  ),
+  director_subagent_done: (p) => {
+    const okColor = p?.ok === true ? "var(--green)" : p?.ok === false ? "var(--red)" : "var(--text-dim)";
+    return (
+      <div>
+        <span style={{ color: okColor, fontWeight: 600 }}>
+          ↲ {p?.subagent} done — ok={String(p?.ok)}
+          {typeof p?.commits_added === "number" ? ` · +${p.commits_added} commits` : ""}
+          {typeof p?.cost_usd === "number" ? ` · $${p.cost_usd.toFixed(3)}` : ""}
+        </span>
+        {p?.summary && (
+          <div style={{ color: "var(--text-dim)", marginLeft: 12, marginTop: 2 }}>{p.summary}</div>
+        )}
+      </div>
+    );
+  },
+  director_end: (p) => (
+    <span style={{ color: "#7c3aed", fontWeight: 600 }}>
+      🎬 Director end — reason: <b>{p?.reason}</b> · {p?.iterations} turns · ${(p?.total_cost_usd ?? 0).toFixed?.(2) ?? p?.total_cost_usd}
+    </span>
+  ),
 };
 
 function PhaseEnd({ payload }: { payload: any }) {

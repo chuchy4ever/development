@@ -144,6 +144,11 @@ export type RunEventType =
   | "command_output"    // command-phase: stdout/stderr chunk
   | "command_end"       // command-phase: process exited
   | "awaiting_approval" // approval-phase: paused, needs user click
+  | "director_start"    // director-phase: begun
+  | "director_decision" // director-phase: turn decided
+  | "director_dispatch" // director-phase: sub-agent / ci_gate invoked
+  | "director_subagent_done" // director-phase: sub-agent / ci_gate finished
+  | "director_end"      // director-phase: terminated
   | "done";             // terminal event
 
 export type AgentRole = "coder" | "reviewer" | "tester";
