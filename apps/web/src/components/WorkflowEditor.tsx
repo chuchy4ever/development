@@ -2339,62 +2339,18 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
                 </select>
               </div>
             )}
-            <div className="form-row">
-              <label>next phase (on success)</label>
-              <select
-                value={selected.next ?? ""}
-                onChange={(e) => updatePhase(selected.id, { next: e.target.value || null })}
-              >
-                <option value="">(none — workflow ends)</option>
-                {wf.phases
-                  .filter((p) => p.id !== selected.id)
-                  .map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.id} ({getTaskKindForPhase(p) ?? (p.agent_id ? agentsById.get(p.agent_id)?.role ?? "?" : "?")})
-                    </option>
-                  ))}
-              </select>
-            </div>
             {getTaskKindForPhase(selected) === null && (
               <div className="form-row">
-                <label>conditional routes (verdict.route → phase)</label>
-                <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>
-                  If the agent's verdict has a <code>route</code> string matching one of these keys,
-                  the engine jumps to the mapped phase instead of using <code>next</code>.
-                </div>
-                <RoutesEditor
-                  phase={selected}
-                  phases={wf.phases}
-                  onChange={(routes) => updatePhase(selected.id, { routes })}
+                <label>notes (appended to this skill's prompt every time it runs)</label>
+                <textarea
+                  value={selected.notes ?? ""}
+                  onChange={(e) => updatePhase(selected.id, { notes: e.target.value || null })}
+                  rows={5}
+                  placeholder="e.g. Focus on security review for this phase."
+                  style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
                 />
               </div>
             )}
-            <div className="form-row">
-              <label>retry target (when verdict.ok=false)</label>
-              <select
-                value={selected.retry_target ?? ""}
-                onChange={(e) => updatePhase(selected.id, { retry_target: e.target.value || null })}
-              >
-                <option value="">(none)</option>
-                {wf.phases
-                  .filter((p) => p.id !== selected.id)
-                  .map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.id} ({getTaskKindForPhase(p) ?? (p.agent_id ? agentsById.get(p.agent_id)?.role ?? "?" : "?")})
-                    </option>
-                  ))}
-              </select>
-            </div>
-            <div className="form-row">
-              <label>max attempts</label>
-              <input
-                type="number"
-                min={1}
-                max={5}
-                value={selected.max_attempts ?? 2}
-                onChange={(e) => updatePhase(selected.id, { max_attempts: Number(e.target.value) })}
-              />
-            </div>
             {getTaskKindForPhase(selected) === null && (
               <div className="form-row">
                 <label>agent timeout (seconds, 0 = none, max 3600)</label>
@@ -2406,34 +2362,85 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
                   onChange={(e) => updatePhase(selected.id, { timeout_sec: Number(e.target.value) || undefined })}
                 />
                 <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
-                  If the agent runs longer than this, it's killed and the verdict becomes ok=false (so retry kicks in).
+                  Hard cap on a single dispatch. If exceeded, sub-agent is killed and Director sees ok=false.
                 </div>
               </div>
             )}
-            {getTaskKindForPhase(selected) === null && (
+            <details style={{ marginTop: 12, padding: "8px 10px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6 }}>
+              <summary style={{ cursor: "pointer", fontSize: 12, color: "var(--text-dim)" }}>
+                ▸ Graph hints (advisory — only visible to Director when planning)
+              </summary>
+              <div style={{ fontSize: 11, color: "var(--text-dim)", margin: "6px 0 10px" }}>
+                These are hints Director sees as "common follow-up" / "on-fail escalation" / conditional routing.
+                Director respects retry/routes more than next, and can override any of them. Useful when you want
+                to push a default ordering; safe to leave empty in most cases.
+              </div>
               <div className="form-row">
-                <label>phase notes (appended to this phase's prompt)</label>
-                <textarea
-                  value={selected.notes ?? ""}
-                  onChange={(e) => updatePhase(selected.id, { notes: e.target.value || null })}
-                  rows={5}
-                  placeholder="e.g. Focus on security review for this phase."
-                  style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+                <label>common follow-up</label>
+                <select
+                  value={selected.next ?? ""}
+                  onChange={(e) => updatePhase(selected.id, { next: e.target.value || null })}
+                >
+                  <option value="">(none)</option>
+                  {wf.phases
+                    .filter((p) => p.id !== selected.id)
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.id} ({getTaskKindForPhase(p) ?? (p.agent_id ? agentsById.get(p.agent_id)?.role ?? "?" : "?")})
+                      </option>
+                    ))}
+                </select>
+              </div>
+              <div className="form-row">
+                <label>on-fail escalate to</label>
+                <select
+                  value={selected.retry_target ?? ""}
+                  onChange={(e) => updatePhase(selected.id, { retry_target: e.target.value || null })}
+                >
+                  <option value="">(none)</option>
+                  {wf.phases
+                    .filter((p) => p.id !== selected.id)
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.id} ({getTaskKindForPhase(p) ?? (p.agent_id ? agentsById.get(p.agent_id)?.role ?? "?" : "?")})
+                      </option>
+                    ))}
+                </select>
+              </div>
+              <div className="form-row">
+                <label>max attempts (legacy retry budget; Director ignores)</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={5}
+                  value={selected.max_attempts ?? 2}
+                  onChange={(e) => updatePhase(selected.id, { max_attempts: Number(e.target.value) })}
                 />
               </div>
-            )}
+              {getTaskKindForPhase(selected) === null && (
+                <div className="form-row">
+                  <label>conditional routes (verdict.route → phase) — legacy</label>
+                  <RoutesEditor
+                    phase={selected}
+                    phases={wf.phases}
+                    onChange={(routes) => updatePhase(selected.id, { routes })}
+                  />
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                <button onClick={() => movePhase(selected.id, -1)} style={{ fontSize: 11 }}>↑ Up</button>
+                <button onClick={() => movePhase(selected.id, 1)} style={{ fontSize: 11 }}>↓ Down</button>
+                <button
+                  onClick={() => updatePhase(selected.id, { position: null })}
+                  title="Forget the saved canvas position; auto-layout will re-place it."
+                  style={{ fontSize: 11 }}
+                >Reset graph position</button>
+              </div>
+            </details>
             </div>
             <div className="phase-modal-footer">
-              <button onClick={() => movePhase(selected.id, -1)}>↑ Up</button>
-              <button onClick={() => movePhase(selected.id, 1)}>↓ Down</button>
-              <button
-                onClick={() => updatePhase(selected.id, { position: null })}
-                title="Forget the saved canvas position; auto-layout will re-place it."
-              >
-                Reset position
-              </button>
-              <div style={{ flex: 1 }} />
               <button className="danger" onClick={() => { deletePhase(selected.id); setSelectedPhaseId(null); }}>Delete</button>
+              <div style={{ flex: 1 }} />
               <button className="primary" onClick={() => setSelectedPhaseId(null)}>Done</button>
             </div>
           </div>
