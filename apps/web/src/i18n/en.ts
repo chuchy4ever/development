@@ -1,0 +1,218 @@
+/**
+ * English strings. Keys are dot-paths grouped by area.
+ * Keep entries SHORT — they're labels, not paragraphs.
+ */
+export const en: Record<string, string> = {
+  // Common
+  "common.save": "Save",
+  "common.cancel": "Cancel",
+  "common.delete": "Delete",
+  "common.close": "Close",
+  "common.edit": "Edit",
+  "common.add": "Add",
+  "common.remove": "Remove",
+  "common.reset": "Reset",
+  "common.apply": "Apply",
+  "common.confirm": "Confirm",
+  "common.loading": "Loading…",
+  "common.saving": "Saving…",
+  "common.saved": "Saved",
+  "common.dirty": "Save changes",
+  "common.optional": "optional",
+  "common.idle": "idle",
+  "common.export": "Export",
+  "common.search": "Search",
+  "common.show_all": "show all",
+  "common.show_legacy_graph": "show legacy graph (advanced)",
+  "common.run": "Run",
+  "common.cost": "cost",
+  "common.status": "status",
+  "common.branch": "branch",
+  "common.exit": "exit",
+
+  // Project tabs
+  "tab.board": "Board",
+  "tab.playbook": "Playbook",
+  "tab.memory": "Memory",
+  "tab.settings": "Settings",
+
+  // Banner
+  "banner.director_orchestrates": "Director orchestrates this playbook.",
+  "banner.director_explains": "You design the library of skills (AI steps) and gates (deterministic checks); Director picks which to run, in what order, based on the ticket. Solid arrows are escalation rules Director respects; dotted arrows are common follow-ups (advisory).",
+
+  // Sections
+  "section.specialists.title": "Specialists",
+  "section.specialists.summary_one": "{count} agent definition (prompts, models, tools)",
+  "section.specialists.summary_many": "{count} agent definitions (prompts, models, tools)",
+  "section.skills.title": "Skills",
+  "section.skills.summary_one": "{count} AI specialist Director can dispatch",
+  "section.skills.summary_many": "{count} AI specialists Director can dispatch",
+  "section.gates.title": "Gates",
+  "section.gates.summary_one": "{count} deterministic check (CI, lint, deploy, approval)",
+  "section.gates.summary_many": "{count} deterministic checks (CI, lint, deploy, approval)",
+  "section.gates.empty": "No gates yet. Add ci_gate (composer ci), lint, deploy, or human approval.",
+  "section.teams.title": "Teams",
+  "section.teams.summary_one": "{count} capability group of agents (devops / dev / review / security…)",
+  "section.teams.summary_many": "{count} capability groups of agents (devops / dev / review / security…)",
+  "section.teams.empty": "No teams configured. Director treats agents individually. Add teams to give Director a clearer “who handles what” map.",
+  "section.playbooks.title": "Named Playbooks",
+  "section.playbooks.summary_one": "{count} recipe Director can pick from",
+  "section.playbooks.summary_many": "{count} recipes Director can pick from",
+  "section.playbooks.empty": "No named Playbooks yet. Director composes ad-hoc dispatches from the skill/gate library. Add a Playbook for a known-good recipe (e.g. \"small_change\", \"feature\", \"bug_fix\").",
+
+  // Buttons
+  "btn.add_skill": "Add skill",
+  "btn.add_gate": "Add gate",
+  "btn.add_team": "Add team",
+  "btn.add_playbook": "Add Named Playbook",
+  "btn.add_step": "step",
+  "btn.add_specialist": "New specialist",
+  "btn.add_from_template": "Add from template…",
+  "btn.apply_template": "Apply template",
+  "btn.save_as_template": "Save as template",
+  "btn.reset_default": "Reset to default",
+  "btn.start_run": "Start run",
+  "btn.open_pr": "Open PR",
+  "btn.cancel_run": "Cancel",
+  "btn.approve": "Approve & continue",
+  "btn.reject": "Reject",
+  "btn.export_log": "Export log",
+
+  // Run view
+  "run.title": "Run {id}",
+  "run.live_log": "Live log ({count})",
+  "run.diff": "Diff ({count})",
+  "run.flow": "FLOW:",
+  "run.no_diff": "No diff yet.",
+  "run.no_match": "No events match the active filters.",
+  "run.failure_reason": "Failure reason:",
+  "run.awaiting_approval": "Awaiting your approval",
+
+  // Filters
+  "filter.director": "Director",
+  "filter.tools": "Tools",
+  "filter.phases": "Phases",
+  "filter.system": "System",
+  "filter.errors": "Errors",
+  "filter.diffs": "Diffs",
+
+  // Team boards
+  "teams_strip.members_one": "{count} member",
+  "teams_strip.members_many": "{count} members",
+
+  // Board tab
+  "board.bulk_import": "Bulk import",
+  "board.col.inbox": "Inbox",
+  "board.col.backlog": "Backlog",
+  "board.col.running": "Running",
+  "board.col.review": "Review",
+  "board.col.done": "Done",
+  "board.col.blocked": "Blocked",
+
+  // Settings
+  "settings.project_specifics": "Project specifics for this playbook",
+  "settings.project_specifics_hint": "Markdown injected into every agent's prompt during runs of this project.",
+
+  // Lang toggle
+  "lang.cs": "Čeština",
+  "lang.en": "English",
+
+  // Skill / phase modal
+  "skill.modal.id": "id",
+  "skill.modal.kind": "type",
+  "skill.modal.kind.agent": "Agent (AI)",
+  "skill.modal.kind.task": "Gate",
+  "skill.modal.kind.approval": "Approval",
+  "skill.modal.agent": "Agent",
+  "skill.modal.notes": "Notes (appended to this skill's prompt every run)",
+  "skill.modal.notes_placeholder": "e.g. Focus on security review for this phase.",
+  "skill.modal.timeout": "Agent timeout (seconds, 0 = none, max 3600)",
+  "skill.modal.timeout_hint": "Hard cap on a single dispatch. If exceeded, sub-agent is killed and Director sees ok=false.",
+  "skill.modal.advanced": "Graph hints (advisory — only visible to Director when planning)",
+  "skill.modal.advanced_hint": "These are hints Director sees as common follow-up / on-fail escalation / conditional routing. Director may override any of them. Safe to leave empty in most cases.",
+  "skill.modal.next": "common follow-up",
+  "skill.modal.retry": "on-fail escalate to",
+  "skill.modal.max_attempts": "max attempts (legacy retry budget; Director ignores)",
+  "skill.modal.routes": "conditional routes (verdict.route → phase) — legacy",
+  "skill.modal.up": "↑ Up",
+  "skill.modal.down": "↓ Down",
+  "skill.modal.reset_pos": "Reset graph position",
+  "skill.modal.kind_hint.agent": "Skill — AI specialist Director can dispatch. Verdict drives Director's next decision.",
+  "skill.modal.kind_hint.task": "Gate — deterministic check (no AI, no tokens). Director runs it on demand; ok=true unblocks mark_done.",
+  "skill.modal.kind_hint.approval": "Pauses the run until you click Approve / Reject in the run view.",
+  "skill.modal.approval_message": "Approval message (markdown, shown to the approver)",
+  "skill.modal.approval_message_placeholder": "e.g. Review the diffs above. Approve to open a PR; reject to bounce back to Senior.",
+
+  // Team modal
+  "team.modal.new": "New team",
+  "team.modal.edit": "Edit team: {name}",
+  "team.modal.name": "Name",
+  "team.modal.name_placeholder": "Dev Team",
+  "team.modal.category": "Category",
+  "team.modal.no_category": "no category",
+  "team.modal.description": "Description",
+  "team.modal.description_placeholder": "when to reach for this team",
+  "team.modal.members": "Members ({count})",
+  "team.modal.delete": "Delete team",
+  "team.modal.create": "Create team",
+  "team.modal.confirm_delete": "Delete team \"{name}\"?",
+  "team.flow.title": "TEAM FLOW",
+  "team.flow.recipes": "📖 Recipes that walk these teams:",
+  "team.flow.steps": "{count} steps",
+  "team.flow.add": "add team",
+
+  // Playbook modal / panel
+  "playbook.name_placeholder": "recipe name (e.g. small_change)",
+  "playbook.description_placeholder": "when to use (e.g. trivial endpoint addition, small bugfix)",
+  "playbook.steps_label": "Steps (Director walks them in order):",
+  "playbook.add_step": "step",
+
+  // Toolbar
+  "toolbar.add": "+ Add",
+  "toolbar.add_agent": "Agent (AI)",
+  "toolbar.add_approval": "Approval gate",
+  "toolbar.layout": "Layout",
+  "toolbar.auto_arrange": "Auto-arrange",
+  "toolbar.align": "Align rows",
+  "toolbar.distribute": "Distribute",
+  "toolbar.unsaved": "Unsaved",
+
+  // ProjectStats
+  "stats.total_spent": "Total spent",
+  "stats.today": "today",
+  "stats.cap": "cap",
+  "stats.avg_per_run": "Avg per run",
+  "stats.runs": "{count} runs",
+  "stats.last_7d": "last 7d",
+  "stats.tickets": "Tickets",
+  "stats.success_rate": "Success rate",
+  "stats.runtime": "Total runtime",
+  "stats.runtime_sub": "across {count} run",
+  "stats.runtime_sub_plural": "across {count} runs",
+  "stats.saved": "Est. dev time saved",
+  "stats.saved_sub": "1.5h × successful runs (rough)",
+  "stats.running": "{count} running",
+
+  // RunView
+  "run.flow.dispatching": "dispatching",
+  "run.flow.subagent_done": "done",
+  "run.flow.director_start": "Director start",
+  "run.flow.director_end": "Director end",
+  "run.confirm_cancel": "Cancel this run? The Coder process will be terminated.",
+  "run.confirm_reject": "Reject this approval? The run will retry the upstream phase if a retry target is set, otherwise fail.",
+  "run.cancel_failed": "Cancel failed",
+  "run.openpr_failed": "Open PR failed",
+  "run.approve_failed": "Approve failed",
+  "run.reject_failed": "Reject failed",
+  "run.approval_note_placeholder": "optional note (audit trail)",
+  "run.export_log_title": "Download all events as JSON for debug",
+  "run.agent_breakdown": "AGENT BREAKDOWN · {count} agents · ${total} total",
+
+  // Banner
+  "banner.dismiss": "got it, hide",
+
+  // Confirm dialogs
+  "confirm.reset_playbook": "Reset playbook to default (one skill per agent role)?",
+  "confirm.apply_template": "Apply this template? It will REPLACE the current playbook and add any missing agents (existing agents are kept).",
+  "confirm.delete_team": "Delete team \"{name}\"?",
+};

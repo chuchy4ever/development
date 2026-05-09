@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Priority, ProjectWithRepos, Run, Ticket, TicketStatus } from "@ceo/shared";
 import { api } from "../api";
 import { RunView } from "./RunView";
+import { useEscClose } from "../hooks";
 
 interface Props {
   ticket: Ticket;
@@ -33,6 +34,7 @@ const STATUS_FG: Record<TicketStatus, string> = {
 };
 
 export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose, onChanged }: Props) {
+  useEscClose(onClose);
   const parent = ticket.parent_ticket_id
     ? (allTickets ?? []).find((t) => t.id === ticket.parent_ticket_id) ?? null
     : null;
@@ -151,7 +153,7 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
   return (
     <>
       <div className="modal-backdrop" onClick={onClose}>
-        <div className="ticket-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="ticket-modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
           <header className="tm-header">
             <div className="tm-key-block">
               {ticket.ticket_key && <div className="tm-key">{ticket.ticket_key}</div>}
@@ -384,7 +386,7 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
               className="primary"
               onClick={startRun}
               disabled={busy || !canStartRun}
-              title={!canStartRun ? "Add a folder or wait for current run" : "Start workflow run"}
+              title={!canStartRun ? "Add a folder or wait for current run" : "Start Director run"}
             >
               {busy ? "..." : "▶ Start run"}
             </button>

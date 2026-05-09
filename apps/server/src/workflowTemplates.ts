@@ -349,6 +349,26 @@ export function saveProjectAsTemplate(args: {
     };
   });
 
+  // Bundle teams that reference at least one of the included agents. Teams
+  // referencing agents NOT in this template's agents[] are kept — those
+  // members will simply be dropped on apply if the destination project
+  // doesn't have them.
+  const teams = (project.workflow.teams ?? []).map((t) => ({
+    id: t.id,
+    name: t.name,
+    description: t.description,
+    category: t.category,
+    agent_names: [...t.agent_names],
+  }));
+
+  // Bundle named Playbooks. Their step phase_ids are stable across save/apply
+  // because the template carries the exact phase IDs.
+  const playbooks = (project.workflow.playbooks ?? []).map((pb) => ({
+    name: pb.name,
+    description: pb.description,
+    steps: pb.steps.map((s) => ({ ...s })),
+  }));
+
   const tpl: WorkflowPreset = {
     key,
     name,
@@ -356,6 +376,9 @@ export function saveProjectAsTemplate(args: {
     source: "user",
     agents,
     phases,
+    teams: teams.length > 0 ? teams : undefined,
+    playbooks: playbooks.length > 0 ? playbooks : undefined,
+    director_config: project.workflow.director_config ?? null,
     project_specifics: project.workflow.project_specifics ?? null,
     created_at: nowIso(),
     updated_at: nowIso(),
@@ -409,8 +432,50 @@ export function applyTemplate(projectId: string, key: string): ApplyTemplateResu
   const updatedProject = loadProjectWithRepos(projectId)!;
   const idByName = new Map(updatedProject.agents.map((a) => [a.name, a.id]));
 
+  // Merge teams: keep existing project teams, add any from template that don't
+  // already exist (matched by id). Drop agent_names that don't resolve in the
+  // destination project so the workflow validator doesn't reject the apply.
+  const projectAgentNames = new Set(updatedProject.agents.map((a) => a.name));
+  const existingTeamIds = new Set((updatedProject.workflow.teams ?? []).map((t) => t.id));
+  let teamsAdded = 0;
+  const teamsForWf = [
+    ...(updatedProject.workflow.teams ?? []),
+    ...((tpl.teams ?? []).filter((t) => !existingTeamIds.has(t.id))).map((t) => {
+      teamsAdded++;
+      return {
+        id: t.id,
+        name: t.name,
+        description: t.description,
+        category: t.category,
+        agent_names: t.agent_names.filter((n) => projectAgentNames.has(n)),
+      };
+    }),
+  ];
+
+  // Merge playbooks: keep existing, add any from template not already present
+  // (by name). Drop steps whose phase_id won't resolve to a phase in the
+  // resulting workflow (we'll recompute phase IDs below — playbooks reference
+  // template phase IDs which become workflow phase IDs verbatim).
+  const templatePhaseIds = new Set(tpl.phases.map((p) => p.id));
+  const existingPlaybookNames = new Set((updatedProject.workflow.playbooks ?? []).map((p) => p.name));
+  let playbooksAdded = 0;
+  const playbooksForWf = [
+    ...(updatedProject.workflow.playbooks ?? []),
+    ...((tpl.playbooks ?? []).filter((pb) => !existingPlaybookNames.has(pb.name))).map((pb) => {
+      playbooksAdded++;
+      return {
+        name: pb.name,
+        description: pb.description,
+        steps: pb.steps.filter((s) => templatePhaseIds.has(s.phase_id)),
+      };
+    }),
+  ];
+
   const wf: WorkflowDefinition = {
     project_specifics: tpl.project_specifics ?? null,
+    director_config: tpl.director_config ?? updatedProject.workflow.director_config ?? null,
+    teams: teamsForWf.length > 0 ? teamsForWf : undefined,
+    playbooks: playbooksForWf.length > 0 ? playbooksForWf : undefined,
     phases: tpl.phases.map((p) => {
       // Normalize legacy command-kind template entries to task shape.
       const np = normalizePhase(p as any);
@@ -447,5 +512,11 @@ export function applyTemplate(projectId: string, key: string): ApplyTemplateResu
   db.prepare(`UPDATE projects SET workflow_json = ?, updated_at = ? WHERE id = ?`)
     .run(JSON.stringify(wf), nowIso(), projectId);
 
-  return { agents_added: added, agents_existing: existing, phases: wf.phases.length };
+  return {
+    agents_added: added,
+    agents_existing: existing,
+    phases: wf.phases.length,
+    teams_added: teamsAdded,
+    playbooks_added: playbooksAdded,
+  };
 }

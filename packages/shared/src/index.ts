@@ -144,6 +144,12 @@ export type RunEventType =
   | "command_output"    // command-phase: stdout/stderr chunk
   | "command_end"       // command-phase: process exited
   | "awaiting_approval" // approval-phase: paused, needs user click
+  | "director_start"    // director-phase: begun
+  | "director_decision" // director-phase: turn decided
+  | "director_thinking" // director-phase: streamed token delta from Director
+  | "director_dispatch" // director-phase: sub-agent / ci_gate invoked
+  | "director_subagent_done" // director-phase: sub-agent / ci_gate finished
+  | "director_end"      // director-phase: terminated
   | "done";             // terminal event
 
 export type AgentRole = "coder" | "reviewer" | "tester";
@@ -169,6 +175,52 @@ export interface CreateAgentInput {
   model?: string | null;
   allowed_tools?: string[] | null;
 }
+
+/** Auto-derive a phase's capability category from its kind / agent name+role.
+ *  Used both by the editor (swimlane layout) and by Director (prompt grouping)
+ *  whenever phase.category is not explicitly set. */
+export function deriveSkillCategory(
+  phase: WorkflowPhase,
+  agent?: { name: string; role: AgentRole } | null,
+): SkillCategory {
+  if (phase.category) return phase.category;
+  if (phase.kind === "task" || phase.kind === "command") return "validation";
+  if (phase.kind === "approval") return "closing";
+  if (!agent) return "general";
+  // Name-based heuristics override role for specialists (a "Closer" is reviewer
+  // role but conceptually closing; "Tech Lead" / "Architect" are coders but
+  // conceptually planning; "DevOps Engineer" is infra).
+  const n = agent.name.toLowerCase();
+  if (n.includes("closer")) return "closing";
+  if (n.includes("devops")) return "infra";
+  if (n.includes("tech lead") || n.includes("architect") || n.includes("cto")) return "planning";
+  if (n.includes("lint")) return "review";
+  if (agent.role === "reviewer") return "review";
+  if (agent.role === "tester") return "validation";
+  if (agent.role === "coder") return "coding";
+  return "general";
+}
+
+/** Display order for swimlanes — top to bottom, the way work tends to flow. */
+export const SKILL_CATEGORY_ORDER: SkillCategory[] = [
+  "planning",
+  "infra",
+  "coding",
+  "review",
+  "validation",
+  "closing",
+  "general",
+];
+
+export const SKILL_CATEGORY_LABEL: Record<SkillCategory, string> = {
+  planning: "Planning",
+  coding: "Coding",
+  review: "Review",
+  validation: "Validation (gates)",
+  closing: "Closing",
+  infra: "Infra",
+  general: "General",
+};
 
 /** A pre-defined agent template the user can instantiate into a project. */
 export interface AgentTemplate {
@@ -225,6 +277,25 @@ export interface TemplatePhase {
   position?: { x: number; y: number } | null;
 }
 
+/** Team bundled in a template. agent_names reference Agent.name within the
+ *  preset's agents[] (or already-present project agents). On apply, missing
+ *  agent references are silently dropped. */
+export interface TemplateTeam {
+  id: string;
+  name: string;
+  description?: string;
+  category?: SkillCategory;
+  agent_names: string[];
+}
+
+/** Playbook bundled in a template. Step phase_ids must match TemplatePhase.id
+ *  values from the same preset (or already-present project phases). */
+export interface TemplatePlaybook {
+  name: string;
+  description: string;
+  steps: PlaybookStep[];
+}
+
 export interface WorkflowPreset {
   key: string;                  // stable identifier
   name: string;
@@ -234,6 +305,12 @@ export interface WorkflowPreset {
   /** Agents this template needs. On apply, missing ones are inserted; existing ones are left alone. */
   agents: AgentBundleEntry[];
   phases: TemplatePhase[];
+  /** Teams bundled with the template (optional — older templates omit this). */
+  teams?: TemplateTeam[];
+  /** Named Playbooks bundled with the template (optional). */
+  playbooks?: TemplatePlaybook[];
+  /** Director config defaults bundled with the template (optional). */
+  director_config?: DirectorConfig | null;
   project_specifics?: string | null;
   created_at?: string;
   updated_at?: string;
@@ -243,7 +320,21 @@ export interface ApplyTemplateResult {
   agents_added: number;
   agents_existing: number;
   phases: number;
+  teams_added?: number;
+  playbooks_added?: number;
 }
+
+/** Category groups skills/gates by what they DO, independent of execution order.
+ *  Director sees them grouped by category in its prompt; the editor lays them
+ *  out in swimlanes. Auto-derived from agent role/name when not set. */
+export type SkillCategory =
+  | "planning"   // Tech Lead, Architect — design / decompose
+  | "coding"     // Junior, Senior, Coder — write code
+  | "review"     // Reviewer, Lint Gate — assess quality
+  | "validation" // ci_gate, tests — deterministic checks (gates)
+  | "closing"    // Closer, deploy, approval — finalize
+  | "infra"      // DevOps — environment / pipeline
+  | "general";
 
 export interface WorkflowPhase {
   id: string;
@@ -254,7 +345,11 @@ export interface WorkflowPhase {
    * "approval" pauses the run until a user explicitly approves or rejects
    * via API (human-in-the-loop gate).
    */
-  kind?: "agent" | "task" | "command" | "approval";
+  kind?: "agent" | "task" | "command" | "approval" | "director";
+  /** Capability group (planning / coding / review / validation / closing / infra).
+   *  Director uses this to organize the playbook by what each skill does, not
+   *  the order of `next` edges. Auto-derived if absent. */
+  category?: SkillCategory;
   /** Required when kind="agent". Reference to an agent in the same project. */
   agent_id?: string;
   /** Required when kind="task". */
@@ -263,6 +358,20 @@ export interface WorkflowPhase {
   approval?: {
     /** Markdown message shown to the approver. */
     message?: string | null;
+  };
+  /** Optional config for kind="director" (see director-pattern branch).
+   *  Director phase replaces the static graph with a Claude-driven dispatcher
+   *  that picks sub-agents turn-by-turn. Skeleton only on the director-pattern
+   *  branch; not wired into the engine yet. */
+  director?: {
+    /** Project-specific brief appended to Director's system prompt. */
+    project_brief?: string | null;
+    /** Hard guard against runaway loops. Default 12. */
+    max_iterations?: number;
+    /** Total budget in USD across Director + sub-agents. Default 8. */
+    budget_usd?: number;
+    /** Subset of project agents Director may dispatch (by name). Default: all. */
+    available_subagents?: string[];
   };
   // ---- legacy command fields (read-shim only; new writes use task.shell) ----
   command?: string;
@@ -284,10 +393,79 @@ export interface WorkflowPhase {
   position?: { x: number; y: number } | null;
 }
 
+/** Project-level Director configuration. Director is the implicit orchestrator
+ *  that runs every workflow as a playbook — it is not a phase in the graph. */
+export interface DirectorConfig {
+  /** Project-specific brief appended to Director's system prompt. */
+  project_brief?: string | null;
+  /** Hard guard against runaway loops. Default 12. */
+  max_iterations?: number;
+  /** Total budget in USD across Director + sub-agents. Default 8. */
+  budget_usd?: number;
+  /** Subset of project agents Director may dispatch (by name). Default: all (minus blacklist). */
+  available_subagents?: string[];
+  /** Override CI command for run_ci_gate; falls back to a workflow phase named "ci_gate". */
+  ci_gate_command?: string;
+  ci_gate_timeout_sec?: number;
+}
+
+/** A Team is a lightweight grouping of agents that solve a class of problem
+ *  together (dev-team, review-team, infra-team, security, qa, …). Teams are
+ *  for Director's mental model and prompt clarity — they don't constrain
+ *  execution. An agent can belong to zero, one, or many teams. */
+export interface Team {
+  /** Unique within a workflow. */
+  id: string;
+  /** Display name (e.g. "Dev Team", "Security"). */
+  name: string;
+  /** When does Director reach for this team? */
+  description?: string;
+  /** Capability category — used for organization in the editor and in Director's prompt. */
+  category?: SkillCategory;
+  /** Names of agents on this team. References Agent.name within the project. */
+  agent_names: string[];
+}
+
+/** Step within a named Playbook — a reference to a skill/gate (phase) the
+ *  Playbook walks in order. Director executes them sequentially when invoking
+ *  the Playbook, with optional per-step note overrides. */
+export interface PlaybookStep {
+  /** Phase id from WorkflowDefinition.phases. */
+  phase_id: string;
+  /** Optional addendum appended to the phase's notes for this Playbook only. */
+  notes_override?: string | null;
+  /** If true, Director may skip this step when its judgement says it's not
+   *  needed (e.g. an extra reviewer pass on a trivial change). Default false. */
+  optional?: boolean;
+}
+
+/** A named recipe Director can pick to solve a class of problem. Bundles an
+ *  ordered list of skills + gates with a "when to use" rule. Director sees
+ *  the Playbook registry in its system prompt and may dispatch one via the
+ *  use_playbook action. */
+export interface Playbook {
+  /** Unique within a workflow. */
+  name: string;
+  /** When to use this Playbook — read by Director when picking. */
+  description: string;
+  /** Ordered steps. Each step references a phase id from workflow.phases. */
+  steps: PlaybookStep[];
+}
+
 export interface WorkflowDefinition {
   phases: WorkflowPhase[];
   /** Project-specific context injected into every agent's prompt for this workflow. */
   project_specifics?: string | null;
+  /** Director (orchestrator) configuration for this workflow. Director runs above
+   *  the graph as an invisible engine — phases serve as its playbook. */
+  director_config?: DirectorConfig | null;
+  /** Named recipes Director can pick from. Optional — if absent, Director
+   *  composes ad-hoc dispatches from the skill/gate library directly. */
+  playbooks?: Playbook[];
+  /** Teams (capability groupings of agents). Director sees them as a separate
+   *  axis from the Skills library — "which team handles this kind of problem?".
+   *  Optional — if empty, agents are treated individually. */
+  teams?: Team[];
 }
 
 /** A workflow definition that does not yet know agent ids — resolved per-project on read. */

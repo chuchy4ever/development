@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Agent, AgentRole, AgentTemplate, ProjectWithRepos } from "@ceo/shared";
 import { api } from "../api";
+import { t, useLang } from "../i18n";
+import { useEscClose } from "../hooks";
 
 interface Props {
   project: ProjectWithRepos;
@@ -16,6 +18,7 @@ const ROLE_COLOR: Record<AgentRole, string> = {
 };
 
 export function AgentsView({ project, onChanged }: Props) {
+  useLang();
   const [agents, setAgents] = useState<Agent[]>(project.agents);
   const [templates, setTemplates] = useState<AgentTemplate[]>([]);
   const [editing, setEditing] = useState<Agent | null>(null);
@@ -90,19 +93,18 @@ export function AgentsView({ project, onChanged }: Props) {
   return (
     <div style={{ maxWidth: 900 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <h3 style={{ margin: 0 }}>Agents</h3>
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={() => setShowTemplates(true)} disabled={busy}>
-            Add from template…
+            {t("btn.add_from_template")}
           </button>
           <button className="primary" onClick={() => setCreating(true)} disabled={busy}>
-            + New agent
+            + {t("btn.add_specialist")}
           </button>
         </div>
       </div>
       <p style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 0 }}>
-        Agents are reusable definitions (role + system prompt + model + tools), grouped by category.
-        The Workflow tab connects them into a pipeline.
+        Specialist definitions: role + system prompt + model + tools. Compose them into Skills,
+        Teams, and Playbooks below; pull from the global Admin templates with "Add from template".
       </p>
 
       {grouped.length === 0 && (
@@ -225,6 +227,7 @@ interface FormProps {
 }
 
 function AgentForm({ mode, initial, projectId, onClose, onSubmit }: FormProps) {
+  useEscClose(onClose);
   const [name, setName] = useState(initial?.name ?? "");
   const [role, setRole] = useState<AgentRole>(initial?.role ?? "coder");
   const [category, setCategory] = useState(initial?.category ?? "Development");
@@ -274,7 +277,7 @@ function AgentForm({ mode, initial, projectId, onClose, onSubmit }: FormProps) {
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <form
-        className="modal"
+        className="modal" role="dialog" aria-modal="true"
         style={{ width: 720, maxHeight: "85vh", display: "flex", flexDirection: "column" }}
         onClick={(e) => e.stopPropagation()}
         onSubmit={submit}
@@ -376,6 +379,7 @@ interface TemplatePickerProps {
 }
 
 function TemplatePickerModal({ templates, existingNames, onClose, onAdd }: TemplatePickerProps) {
+  useEscClose(onClose);
   const grouped = useMemo(() => {
     const map = new Map<string, AgentTemplate[]>();
     for (const t of templates) {
@@ -388,7 +392,7 @@ function TemplatePickerModal({ templates, existingNames, onClose, onAdd }: Templ
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
-        className="modal"
+        className="modal" role="dialog" aria-modal="true"
         style={{ width: 720, maxHeight: "85vh", display: "flex", flexDirection: "column" }}
         onClick={(e) => e.stopPropagation()}
       >

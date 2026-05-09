@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { useEscClose } from "../hooks";
 
 interface Props {
   onPick: (absolutePath: string) => void;
@@ -7,6 +8,7 @@ interface Props {
 }
 
 export function FolderPicker({ onPick, onClose }: Props) {
+  useEscClose(onClose);
   const [data, setData] = useState<Awaited<ReturnType<typeof api.browseFolder>> | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -46,7 +48,7 @@ export function FolderPicker({ onPick, onClose }: Props) {
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
-        className="modal"
+        className="modal" role="dialog" aria-modal="true"
         style={{ width: 640, maxHeight: "80vh", display: "flex", flexDirection: "column" }}
         onClick={(e) => e.stopPropagation()}
       >

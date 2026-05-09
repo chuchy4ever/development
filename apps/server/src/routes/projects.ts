@@ -184,6 +184,17 @@ projectsRouter.put("/:id/workflow", (req, res) => {
       if (p.approval && p.approval.message !== undefined && p.approval.message !== null && typeof p.approval.message !== "string") {
         return res.status(400).json({ error: `approval phase "${p.id}" message must be a string` });
       }
+    } else if (p.kind === "director") {
+      // Director phase config is optional. All fields have defaults.
+      if (p.director && typeof p.director !== "object") {
+        return res.status(400).json({ error: `director phase "${p.id}" config must be an object` });
+      }
+      if (p.director?.max_iterations !== undefined && (typeof p.director.max_iterations !== "number" || p.director.max_iterations <= 0)) {
+        return res.status(400).json({ error: `director phase "${p.id}" max_iterations must be positive` });
+      }
+      if (p.director?.budget_usd !== undefined && (typeof p.director.budget_usd !== "number" || p.director.budget_usd <= 0)) {
+        return res.status(400).json({ error: `director phase "${p.id}" budget_usd must be positive` });
+      }
     } else {
       if (!p.agent_id || !agentIds.has(p.agent_id)) {
         return res.status(400).json({
@@ -206,6 +217,63 @@ projectsRouter.put("/:id/workflow", (req, res) => {
         if (!phaseIds.has(target)) {
           return res.status(400).json({
             error: `phase "${p.id}" route "${key}" → "${target}" does not exist`,
+          });
+        }
+      }
+    }
+  }
+  // Validate Teams (optional). Names unique, ids unique, agent_names must
+  // resolve to actual project agents.
+  if (wf.teams) {
+    if (!Array.isArray(wf.teams)) {
+      return res.status(400).json({ error: "teams must be an array" });
+    }
+    const ids = new Set<string>();
+    const names = new Set<string>();
+    const agentNames = new Set(project.agents.map((a) => a.name));
+    for (const t of wf.teams) {
+      if (!t.id || typeof t.id !== "string") {
+        return res.status(400).json({ error: "team id is required" });
+      }
+      if (ids.has(t.id)) return res.status(400).json({ error: `duplicate team id "${t.id}"` });
+      ids.add(t.id);
+      if (!t.name || typeof t.name !== "string") {
+        return res.status(400).json({ error: `team "${t.id}" name is required` });
+      }
+      if (names.has(t.name)) return res.status(400).json({ error: `duplicate team name "${t.name}"` });
+      names.add(t.name);
+      if (!Array.isArray(t.agent_names)) {
+        return res.status(400).json({ error: `team "${t.name}" agent_names must be an array` });
+      }
+      for (const n of t.agent_names) {
+        if (typeof n !== "string" || !agentNames.has(n)) {
+          return res.status(400).json({ error: `team "${t.name}" references unknown agent "${n}"` });
+        }
+      }
+    }
+  }
+  // Validate named Playbooks (optional). Each must have a unique name and
+  // every step must reference an existing phase id.
+  if (wf.playbooks) {
+    if (!Array.isArray(wf.playbooks)) {
+      return res.status(400).json({ error: "playbooks must be an array" });
+    }
+    const seen = new Set<string>();
+    for (const pb of wf.playbooks) {
+      if (!pb.name || typeof pb.name !== "string") {
+        return res.status(400).json({ error: "playbook name is required" });
+      }
+      if (seen.has(pb.name)) {
+        return res.status(400).json({ error: `duplicate playbook name "${pb.name}"` });
+      }
+      seen.add(pb.name);
+      if (!Array.isArray(pb.steps) || pb.steps.length === 0) {
+        return res.status(400).json({ error: `playbook "${pb.name}" must have at least one step` });
+      }
+      for (const step of pb.steps) {
+        if (!step.phase_id || !phaseIds.has(step.phase_id)) {
+          return res.status(400).json({
+            error: `playbook "${pb.name}" references unknown phase "${step.phase_id}"`,
           });
         }
       }
@@ -241,6 +309,69 @@ projectsRouter.put("/:id/memory", (req, res) => {
   const content = typeof req.body?.content === "string" ? req.body.content : "";
   writeMemory(req.params.id, content);
   res.json({ content });
+});
+
+projectsRouter.get("/:id/stats", (req, res) => {
+  if (!loadProjectWithRepos(req.params.id)) {
+    return res.status(404).json({ error: "not found" });
+  }
+  const projectId = req.params.id;
+  // Aggregate everything in SQL — for projects with thousands of runs,
+  // streaming all rows and reducing in JS doesn't scale.
+  const todayIso = new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
+  const sevenDaysIso = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
+  const nowIsoStr = new Date().toISOString();
+
+  const agg = db.prepare(`
+    SELECT
+      COUNT(*) AS runs_total,
+      COALESCE(SUM(total_cost_usd), 0) AS total_cost_usd,
+      COALESCE(SUM(CASE WHEN created_at >= ? THEN total_cost_usd ELSE 0 END), 0) AS today_cost_usd,
+      COALESCE(SUM(CASE WHEN created_at >= ? THEN total_cost_usd ELSE 0 END), 0) AS last_7_days_cost_usd,
+      COALESCE(
+        SUM(
+          CASE WHEN started_at IS NOT NULL THEN
+            (julianday(COALESCE(finished_at, ?)) - julianday(started_at)) * 86400000
+          ELSE 0 END
+        ), 0
+      ) AS total_runtime_ms
+    FROM runs
+    WHERE project_id = ?
+  `).get(todayIso, sevenDaysIso, nowIsoStr, projectId) as {
+    runs_total: number;
+    total_cost_usd: number;
+    today_cost_usd: number;
+    last_7_days_cost_usd: number;
+    total_runtime_ms: number;
+  };
+
+  const runsByStatusRows = db.prepare(
+    `SELECT status, COUNT(*) AS cnt FROM runs WHERE project_id = ? GROUP BY status`,
+  ).all(projectId) as { status: string; cnt: number }[];
+  const runs_by_status: Record<string, number> = {};
+  for (const r of runsByStatusRows) runs_by_status[r.status] = r.cnt;
+
+  const ticketsByStatusRows = db.prepare(
+    `SELECT status, COUNT(*) AS cnt FROM tickets WHERE project_id = ? GROUP BY status`,
+  ).all(projectId) as { status: string; cnt: number }[];
+  const tickets_by_status: Record<string, number> = {};
+  for (const t of ticketsByStatusRows) tickets_by_status[t.status] = t.cnt;
+  const tickets_total = ticketsByStatusRows.reduce((s, r) => s + r.cnt, 0);
+
+  const succeeded = runs_by_status.succeeded ?? 0;
+
+  res.json({
+    runs_total: agg.runs_total,
+    runs_by_status,
+    total_cost_usd: +agg.total_cost_usd.toFixed(4),
+    today_cost_usd: +agg.today_cost_usd.toFixed(4),
+    last_7_days_cost_usd: +agg.last_7_days_cost_usd.toFixed(4),
+    total_runtime_ms: Math.round(agg.total_runtime_ms),
+    avg_cost_per_run_usd: agg.runs_total > 0 ? +(agg.total_cost_usd / agg.runs_total).toFixed(4) : 0,
+    tickets_by_status,
+    tickets_total,
+    estimated_saved_hours: +(succeeded * 1.5).toFixed(1),
+  });
 });
 
 projectsRouter.delete("/:id/repos/:repoId", (req, res) => {

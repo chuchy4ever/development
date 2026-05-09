@@ -1,4 +1,5 @@
 import type { ActiveRunSummary, Ticket, TicketStatus } from "@ceo/shared";
+import { t, useLang } from "../i18n";
 
 interface Props {
   tickets: Ticket[];
@@ -6,14 +7,7 @@ interface Props {
   onCardClick: (ticket: Ticket) => void;
 }
 
-const COLUMNS: { id: TicketStatus; label: string }[] = [
-  { id: "inbox", label: "Inbox" },
-  { id: "backlog", label: "Backlog" },
-  { id: "running", label: "Running" },
-  { id: "review", label: "Review" },
-  { id: "done", label: "Done" },
-  { id: "blocked", label: "Blocked" },
-];
+const COLUMN_IDS: TicketStatus[] = ["inbox", "backlog", "running", "review", "done", "blocked"];
 
 const STATUS_COLOR: Record<TicketStatus, string> = {
   inbox: "var(--text-dim)",
@@ -25,6 +19,7 @@ const STATUS_COLOR: Record<TicketStatus, string> = {
 };
 
 export function Kanban({ tickets, activeRuns, onCardClick }: Props) {
+  useLang();
   const activeByTicket = new Map<string, ActiveRunSummary>();
   for (const r of activeRuns ?? []) activeByTicket.set(r.ticket_id, r);
   const byStatus: Record<TicketStatus, Ticket[]> = {
@@ -46,21 +41,21 @@ export function Kanban({ tickets, activeRuns, onCardClick }: Props) {
 
   return (
     <div className="kanban">
-      {COLUMNS.map((col) => (
-        <div key={col.id} className="column">
+      {COLUMN_IDS.map((colId) => (
+        <div key={colId} className="column">
           <div className="column-header">
-            <span>{col.label}</span>
-            <span>{byStatus[col.id].length}</span>
+            <span>{t(`board.col.${colId}`)}</span>
+            <span>{byStatus[colId].length}</span>
           </div>
           <div className="column-body">
-            {byStatus[col.id].map((t) => (
+            {byStatus[colId].map((tk) => (
               <TicketCard
-                key={t.id}
-                ticket={t}
-                parentTitle={t.parent_ticket_id ? titleById.get(t.parent_ticket_id) ?? null : null}
-                children={childrenByParent.get(t.id) ?? null}
-                activeRun={activeByTicket.get(t.id) ?? null}
-                onClick={() => onCardClick(t)}
+                key={tk.id}
+                ticket={tk}
+                parentTitle={tk.parent_ticket_id ? titleById.get(tk.parent_ticket_id) ?? null : null}
+                children={childrenByParent.get(tk.id) ?? null}
+                activeRun={activeByTicket.get(tk.id) ?? null}
+                onClick={() => onCardClick(tk)}
               />
             ))}
           </div>
@@ -88,9 +83,11 @@ function TicketCard({ ticket, parentTitle, children, activeRun, onClick }: CardP
   const isSubtask = !!ticket.parent_ticket_id;
   const hasChildren = !!children && children.length > 0;
   return (
-    <div
+    <button
+      type="button"
       className={`card ${isSubtask ? "card-subtask" : ""}`}
       onClick={onClick}
+      aria-label={`${ticket.ticket_key ?? ticket.id.slice(0, 6)} — ${ticket.title}`}
     >
       {parentTitle && (
         <div className="card-parent" title={`Subtask of: ${parentTitle}`}>
@@ -132,7 +129,7 @@ function TicketCard({ ticket, parentTitle, children, activeRun, onClick }: CardP
           waiting on {ticket.depends_on.length} ticket{ticket.depends_on.length === 1 ? "" : "s"}
         </div>
       )}
-    </div>
+    </button>
   );
 }
 

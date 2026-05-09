@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { ProjectWithRepos } from "@ceo/shared";
 import { api } from "../api";
+import { useEscClose } from "../hooks";
 
 interface Props {
   onClose: () => void;
@@ -8,6 +9,7 @@ interface Props {
 }
 
 export function CreateProjectModal({ onClose, onCreated }: Props) {
+  useEscClose(onClose);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [busy, setBusy] = useState(false);
@@ -30,7 +32,7 @@ export function CreateProjectModal({ onClose, onCreated }: Props) {
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <form className="modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+      <form className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
         <h3>New project</h3>
         <div className="form-row">
           <label>Name</label>

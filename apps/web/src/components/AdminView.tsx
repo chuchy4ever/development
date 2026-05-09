@@ -203,6 +203,14 @@ function Templates() {
   const [importText, setImportText] = useState("");
   const [showImport, setShowImport] = useState(false);
 
+  // Esc closes the import dialog when it's open.
+  useEffect(() => {
+    if (!showImport) return;
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") setShowImport(false); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [showImport]);
+
   async function refresh() {
     try {
       setList(await api.listWorkflowPresets());
@@ -245,7 +253,7 @@ function Templates() {
   return (
     <div style={{ maxWidth: 900 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <h3 style={{ margin: 0 }}>Workflow templates</h3>
+        <h3 style={{ margin: 0 }}>Playbook templates</h3>
         <button className="primary" onClick={() => setShowImport(true)} disabled={busy}>
           Import JSON…
         </button>
@@ -293,7 +301,7 @@ function Templates() {
 
       {showImport && (
         <div className="modal-backdrop" onClick={() => setShowImport(false)}>
-          <div className="modal" style={{ width: 720 }} onClick={(e) => e.stopPropagation()}>
+          <div className="modal" role="dialog" aria-modal="true" style={{ width: 720 }} onClick={(e) => e.stopPropagation()}>
             <h3>Import workflow template</h3>
             <p style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 0 }}>
               Paste a template JSON (exported from another instance, or a curated team setup).

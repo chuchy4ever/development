@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactFlow, {
   BaseEdge,
   Background,
@@ -22,18 +22,32 @@ import type {
   ActiveRunSummary,
   Agent,
   AgentRole,
+  Playbook,
   ProjectWithRepos,
+  SkillCategory,
+  Team,
   Ticket,
   WorkflowDefinition,
   WorkflowPhase,
   WorkflowPreset,
 } from "@ceo/shared";
+import {
+  deriveSkillCategory,
+  SKILL_CATEGORY_LABEL,
+  SKILL_CATEGORY_ORDER,
+} from "@ceo/shared";
 import { api } from "../api";
+import { AgentsView } from "./AgentsView";
+import { t, useLang } from "../i18n";
+import { useEscClose } from "../hooks";
 import { CodeEditorModal } from "./CodeEditorModal";
 
 interface Props {
   project: ProjectWithRepos;
   tickets?: Ticket[];
+  /** Callback to refresh project (incl. agents) after edits in the embedded
+   *  Specialists section. Provided by ProjectView. */
+  onChanged?: () => Promise<void>;
 }
 
 const ROLE_COLOR: Record<AgentRole, string> = {
@@ -269,6 +283,7 @@ function PhaseNode({ data, selected }: NodeProps<PhaseNodeData>) {
   const taskType = getTaskKindForPhase(phase);
   const isTask = taskType !== null;
   const isApproval = phase.kind === "approval";
+  const isDirector = phase.kind === "director";
   const taskMeta = taskType ? TASK_TYPES[taskType] : null;
   const role = agent?.role ?? "coder";
 
@@ -283,26 +298,28 @@ function PhaseNode({ data, selected }: NodeProps<PhaseNodeData>) {
 
   const tooltip = active.length > 0
     ? `${active.length} active:\n` + active.map((a) => `${a.ticket_key ?? a.ticket_id.slice(0, 6)} ${a.ticket_title}`).join("\n")
+    : isDirector
+    ? `director · ${phase.id}\nbudget $${phase.director?.budget_usd ?? 8} · max ${phase.director?.max_iterations ?? 12} iter`
     : isApproval
     ? `approval · ${phase.id}\n${phase.approval?.message ?? "(no message)"}`
     : isTask
     ? `${taskType} · ${phase.id}\n${taskSummary}`
     : `${agent?.name ?? "(missing)"} · ${phase.id}`;
 
-  // Task & approval phases are valid without an agent; only flag agent phases as "missing".
-  const isMissing = !isTask && !isApproval && !agent;
+  // Task / approval / director phases are valid without an agent; only flag agent phases as "missing".
+  const isMissing = !isTask && !isApproval && !isDirector && !agent;
 
   return (
     <div className="n8n-node-wrap" title={tooltip}>
       <div
-        className={`n8n-node ${selected ? "selected" : ""} ${isMissing ? "missing" : ""} ${(isTask || isApproval) ? "command" : ""}`}
+        className={`n8n-node ${selected ? "selected" : ""} ${isMissing ? "missing" : ""} ${(isTask || isApproval || isDirector) ? "command" : ""}`}
       >
         <Handle id="in" type="target" position={Position.Left} className="n8n-handle" />
         <div
           className="n8n-node-icon"
-          style={{ background: isApproval ? "#f59e0b" : (taskMeta ? taskMeta.color : (ROLE_COLOR[role] ?? "#666")) }}
+          style={{ background: isDirector ? "#7c3aed" : isApproval ? "#f59e0b" : (taskMeta ? taskMeta.color : (ROLE_COLOR[role] ?? "#666")) }}
         >
-          {isApproval ? "⏸" : (taskMeta ? taskMeta.icon : (ROLE_GLYPH[role] ?? "?"))}
+          {isDirector ? "🎬" : isApproval ? "⏸" : (taskMeta ? taskMeta.icon : (ROLE_GLYPH[role] ?? "?"))}
         </div>
         <Handle id="out" type="source" position={Position.Right} className="n8n-handle" />
         {/* Hidden bottom handles for backward (retry) edges — they keep retries
@@ -343,7 +360,14 @@ function PhaseNode({ data, selected }: NodeProps<PhaseNodeData>) {
         )}
       </div>
       <div className="n8n-node-label">{phase.id}</div>
-      {isApproval ? (
+      {isDirector ? (
+        <div
+          className="n8n-node-sublabel"
+          style={{ fontSize: 10, opacity: 0.75, color: "#7c3aed", fontWeight: 600 }}
+        >
+          Director · ${phase.director?.budget_usd ?? 8} · {phase.director?.max_iterations ?? 12}t
+        </div>
+      ) : isApproval ? (
         <div
           className="n8n-node-sublabel"
           style={{ fontSize: 10, opacity: 0.75, color: "#92400e" }}
@@ -355,11 +379,21 @@ function PhaseNode({ data, selected }: NodeProps<PhaseNodeData>) {
           className="n8n-node-sublabel"
           style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 10, opacity: 0.75 }}
         >
+          <span style={{ textTransform: "uppercase", fontWeight: 600, letterSpacing: 0.5, marginRight: 4, opacity: 0.7 }}>
+            Gate
+          </span>
           {taskMeta?.label ?? taskType}
           {taskSummary ? ` · ${taskSummary}` : ""}
         </div>
       ) : (
-        agent && <div className="n8n-node-sublabel">{agent.name}</div>
+        agent && (
+          <div className="n8n-node-sublabel">
+            <span style={{ textTransform: "uppercase", fontWeight: 600, letterSpacing: 0.5, marginRight: 4, opacity: 0.65, fontSize: 9 }}>
+              Skill
+            </span>
+            {agent.name}
+          </div>
+        )
       )}
     </div>
   );
@@ -502,8 +536,11 @@ function buildFlow(
   activeByPhase: Map<string, ActiveRunSummary[]>,
   queuedTickets: Ticket[],
 ): { nodes: Node<PhaseNodeData>[]; edges: Edge[] } {
-  const entryPhaseId = wf.phases[0]?.id;
-  const nodes: Node<PhaseNodeData>[] = wf.phases.map((p, i) => ({
+  // Director is the implicit orchestrator and does not appear on the canvas —
+  // the user designs the playbook (phases) and Director runs above it.
+  const visiblePhases = wf.phases.filter((p) => p.kind !== "director");
+  const entryPhaseId = visiblePhases[0]?.id;
+  const nodes: Node<PhaseNodeData>[] = visiblePhases.map((p, i) => ({
     id: p.id,
     type: "phase",
     position: p.position ?? { x: 60 + i * 240, y: 120 },
@@ -541,9 +578,13 @@ function buildFlow(
   }
 
   const edges: Edge[] = [];
-  for (const p of wf.phases) {
+  for (const p of visiblePhases) {
     if (p.next) {
       const bypass = needsBypassArc(p.id, p.next);
+      // "next" is an advisory hint to Director (common follow-up), not enforced
+      // sequencing. Render dotted/lighter to communicate that Director may
+      // skip, reorder, or revisit. Retry edges (red dashed) and routes stay
+      // strong because they encode escalation rules Director respects.
       edges.push({
         id: `next-${p.id}-${p.next}`,
         type: bypass ? "bypass" : "default",
@@ -551,8 +592,8 @@ function buildFlow(
         sourceHandle: "out",
         target: p.next,
         targetHandle: "in",
-        markerEnd: { type: MarkerType.ArrowClosed, color: "#3b82f6" },
-        style: { stroke: "#3b82f6", strokeWidth: 2.5 },
+        markerEnd: { type: MarkerType.ArrowClosed, color: "#93c5fd" },
+        style: { stroke: "#93c5fd", strokeWidth: 1.5, strokeDasharray: "4 3" },
         deletable: true,
         data: { kind: "next" },
       });
@@ -611,24 +652,36 @@ function clonePhase(p: WorkflowPhase): WorkflowPhase {
  * Phases reachable only via a `route` (i.e. fork branches like Architect)
  * are placed on a parallel lane above the main flow.
  */
-function autoArrange(wf: WorkflowDefinition): Map<string, { x: number; y: number }> {
+function autoArrange(
+  wf: WorkflowDefinition,
+  agentsById?: Map<string, Agent>,
+): Map<string, { x: number; y: number }> {
   const X_STEP = 180;
-  const X_OFFSET = 60;
-  const Y_MAIN = 240;
-  const Y_BRANCH = 80;
+  const X_OFFSET = 80;
+  const LANE_HEIGHT = 140;
+  const LANE_TOP = 60;
 
   const phaseById = new Map(wf.phases.map((p) => [p.id, p]));
 
-  // Determine which phases are "main path" — i.e. reached as someone's `next`.
-  // The entry phase is always main. Phases reached ONLY via `route` are branches.
-  const reachedAsNext = new Set<string>();
+  // Group phases by capability category — each category becomes a horizontal
+  // swimlane. Within a lane, BFS level on `next` edges drives X position.
+  const cat = (p: WorkflowPhase): SkillCategory => {
+    const a = p.agent_id ? agentsById?.get(p.agent_id) : null;
+    return deriveSkillCategory(p, a ? { name: a.name, role: a.role } : null);
+  };
+
+  const phasesByCategory = new Map<SkillCategory, WorkflowPhase[]>();
   for (const p of wf.phases) {
-    if (p.next) reachedAsNext.add(p.next);
+    if (p.kind === "director") continue; // hidden
+    const c = cat(p);
+    if (!phasesByCategory.has(c)) phasesByCategory.set(c, []);
+    phasesByCategory.get(c)!.push(p);
   }
 
-  // BFS levels.
+  // BFS over `next` from entry to compute X levels; phases not reached pile
+  // at level 0 of their lane.
   const level = new Map<string, number>();
-  const entry = wf.phases[0]?.id;
+  const entry = wf.phases.find((p) => p.kind !== "director")?.id;
   if (entry) {
     level.set(entry, 0);
     const queue = [entry];
@@ -651,41 +704,767 @@ function autoArrange(wf: WorkflowDefinition): Map<string, { x: number; y: number
   }
   for (const p of wf.phases) if (!level.has(p.id)) level.set(p.id, 0);
 
-  // Classify lane: main vs branch.
-  const isMain = (id: string) => id === entry || reachedAsNext.has(id);
-  const mainAtLevel = new Map<number, string[]>();
-  const branchAtLevel = new Map<number, string[]>();
-  for (const p of wf.phases) {
-    const lv = level.get(p.id) ?? 0;
-    const bucket = isMain(p.id) ? mainAtLevel : branchAtLevel;
-    bucket.set(lv, [...(bucket.get(lv) ?? []), p.id]);
-  }
-
   const positions = new Map<string, { x: number; y: number }>();
+  // Determine lane Y per category: only categories that have phases get a
+  // lane, in the canonical SKILL_CATEGORY_ORDER.
+  const activeCats = SKILL_CATEGORY_ORDER.filter((c) => (phasesByCategory.get(c)?.length ?? 0) > 0);
+  const laneY = new Map<SkillCategory, number>();
+  activeCats.forEach((c, i) => laneY.set(c, LANE_TOP + i * LANE_HEIGHT));
 
-  // Place main lane.
-  for (const [lv, ids] of mainAtLevel) {
-    const x = X_OFFSET + lv * X_STEP;
-    if (ids.length === 1) {
-      positions.set(ids[0]!, { x, y: Y_MAIN });
-    } else {
-      ids.forEach((id, i) => {
-        positions.set(id, { x, y: Y_MAIN + (i - (ids.length - 1) / 2) * 140 });
-      });
+  for (const [c, list] of phasesByCategory) {
+    const y = laneY.get(c) ?? LANE_TOP;
+    // Group within lane by level; if multiple phases share a level, stack them.
+    const byLevel = new Map<number, WorkflowPhase[]>();
+    for (const p of list) {
+      const lv = level.get(p.id) ?? 0;
+      byLevel.set(lv, [...(byLevel.get(lv) ?? []), p]);
     }
-  }
-  // Place branch lane (above).
-  for (const [lv, ids] of branchAtLevel) {
-    const x = X_OFFSET + lv * X_STEP;
-    if (ids.length === 1) {
-      positions.set(ids[0]!, { x, y: Y_BRANCH });
-    } else {
-      ids.forEach((id, i) => {
-        positions.set(id, { x, y: Y_BRANCH + (i - (ids.length - 1) / 2) * 100 });
+    for (const [lv, group] of byLevel) {
+      const x = X_OFFSET + lv * X_STEP;
+      group.forEach((p, i) => {
+        positions.set(p.id, { x, y: y + i * 60 });
       });
     }
   }
   return positions;
+}
+
+/**
+ * Collapsible panel above the canvas for managing named Playbooks.
+ *
+ * A Playbook is a recipe Director can pick: a name, when-to-use description,
+ * and an ordered list of skill/gate references. The user composes them from
+ * the existing skills/gates in the canvas; on apply, Director can call
+ * `use_playbook` to walk the whole recipe in one go.
+ */
+function NamedPlaybooksPanel({
+  wf,
+  agentsById,
+  onChange,
+}: {
+  wf: WorkflowDefinition;
+  agentsById: Map<string, Agent>;
+  onChange: (updater: (next: WorkflowDefinition) => void) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const playbooks = wf.playbooks ?? [];
+  const phases = wf.phases.filter((p) => p.kind !== "director");
+
+  const updatePlaybook = (idx: number, patch: Partial<{ name: string; description: string; steps: WorkflowDefinition["playbooks"] extends (infer U)[] | undefined ? U extends { steps: infer S } ? S : never : never }>) => {
+    onChange((next) => {
+      if (!next.playbooks) return;
+      const cur = next.playbooks[idx];
+      if (!cur) return;
+      Object.assign(cur, patch);
+    });
+  };
+
+  const phaseLabel = (phaseId: string) => {
+    const p = wf.phases.find((x) => x.id === phaseId);
+    if (!p) return `${phaseId} (missing)`;
+    if (p.kind === "agent" && p.agent_id) {
+      const a = agentsById.get(p.agent_id);
+      return `${phaseId}${a ? ` · ${a.name}` : ""}`;
+    }
+    if (p.kind === "task") return `${phaseId} · ${p.task?.type ?? "gate"} (gate)`;
+    if (p.kind === "approval") return `${phaseId} · approval`;
+    return phaseId;
+  };
+
+  return (
+    <div style={{
+      border: "1px solid var(--border)",
+      borderRadius: 8, fontSize: 12,
+      background: "var(--bg-elev)",
+    }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          width: "100%", padding: "8px 14px",
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          background: "transparent", border: 0, color: "var(--text)", cursor: "pointer",
+          textAlign: "left", fontSize: 13,
+        }}
+      >
+        <span><b>{t("section.playbooks.title")}</b> <span style={{ color: "var(--text-dim)" }}>· {t(playbooks.length === 1 ? "section.playbooks.summary_one" : "section.playbooks.summary_many", { count: playbooks.length })}</span></span>
+        <span style={{ color: "var(--text-dim)" }}>{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+        <div style={{ padding: "0 14px 12px", borderTop: "1px solid var(--border)" }}>
+          {playbooks.length === 0 && (
+            <div style={{ color: "var(--text-dim)", padding: "12px 0" }}>
+              {t("section.playbooks.empty")}
+            </div>
+          )}
+          {playbooks.map((pb, idx) => (
+            <div key={idx} style={{
+              border: "1px solid var(--border)", borderRadius: 6,
+              padding: 10, marginTop: 10, background: "var(--bg)",
+            }}>
+              <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+                <input
+                  value={pb.name}
+                  placeholder="recipe name (e.g. small_change)"
+                  onChange={(e) => updatePlaybook(idx, { name: e.target.value })}
+                  style={{ flex: "0 0 220px", fontFamily: "ui-monospace,monospace" }}
+                />
+                <input
+                  value={pb.description}
+                  placeholder="when to use (e.g. trivial endpoint addition, small bugfix)"
+                  onChange={(e) => updatePlaybook(idx, { description: e.target.value })}
+                  style={{ flex: 1 }}
+                />
+                <button
+                  onClick={() => onChange((next) => { next.playbooks = (next.playbooks ?? []).filter((_, i) => i !== idx); })}
+                  title="Remove playbook"
+                >×</button>
+              </div>
+              <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>Steps (Director walks them in order):</div>
+              {pb.steps.map((step, sIdx) => (
+                <div key={sIdx} style={{ display: "flex", gap: 6, marginBottom: 4, alignItems: "center" }}>
+                  <span style={{ color: "var(--text-dim)", width: 16 }}>{sIdx + 1}.</span>
+                  <select
+                    value={step.phase_id}
+                    onChange={(e) => onChange((next) => {
+                      const s = next.playbooks?.[idx]?.steps[sIdx];
+                      if (s) s.phase_id = e.target.value;
+                    })}
+                    style={{ flex: 1 }}
+                  >
+                    {phases.map((p) => (
+                      <option key={p.id} value={p.id}>{phaseLabel(p.id)}</option>
+                    ))}
+                  </select>
+                  <label style={{ display: "flex", gap: 4, alignItems: "center", color: "var(--text-dim)" }}>
+                    <input
+                      type="checkbox"
+                      checked={!!step.optional}
+                      onChange={(e) => onChange((next) => {
+                        const s = next.playbooks?.[idx]?.steps[sIdx];
+                        if (s) s.optional = e.target.checked || undefined;
+                      })}
+                    />
+                    optional
+                  </label>
+                  <button onClick={() => onChange((next) => {
+                    const pb2 = next.playbooks?.[idx];
+                    if (pb2) pb2.steps = pb2.steps.filter((_, i) => i !== sIdx);
+                  })} title="Remove step">×</button>
+                </div>
+              ))}
+              <button
+                style={{ marginTop: 4 }}
+                onClick={() => onChange((next) => {
+                  const pb2 = next.playbooks?.[idx];
+                  if (pb2 && phases[0]) pb2.steps.push({ phase_id: phases[0].id });
+                })}
+                disabled={phases.length === 0}
+              >+ {t("btn.add_step")}</button>
+            </div>
+          ))}
+          <button
+            style={{ marginTop: 10 }}
+            onClick={() => onChange((next) => {
+              if (!next.playbooks) next.playbooks = [];
+              next.playbooks.push({ name: `recipe_${next.playbooks.length + 1}`, description: "", steps: [] });
+            })}
+          >+ {t("btn.add_playbook")}</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─────────────────────── Stacked-panels editor (no graph) ──────────────── */
+
+/**
+ * Specialists section — embeds the agent definition editor (formerly the
+ * standalone "Agents" tab). Closed by default; users only need to open it
+ * when adding/editing an agent's prompt or model. Day-to-day orchestration
+ * happens via the Skills/Gates/Teams/Playbooks sections below.
+ */
+function SpecialistsSection({
+  project,
+  onChanged,
+}: {
+  project: ProjectWithRepos;
+  onChanged?: () => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <CollapsibleSection
+      open={open}
+      onToggle={() => setOpen((o) => !o)}
+      title={t("section.specialists.title")}
+      summary={t(project.agents.length === 1 ? "section.specialists.summary_one" : "section.specialists.summary_many", { count: project.agents.length })}
+      icon="🧠"
+    >
+      <div style={{ paddingTop: 8 }}>
+        <AgentsView
+          project={project}
+          onChanged={async () => { if (onChanged) await onChanged(); }}
+        />
+      </div>
+    </CollapsibleSection>
+  );
+}
+
+
+/**
+ * Skills panel — agent phases as a flat list, grouped by capability category.
+ * Replaces the graph canvas for skills. Each row opens the existing edit
+ * modal on click. Add at the bottom.
+ */
+function SkillsPanel({
+  wf,
+  agentsById,
+  onSelect,
+  onAdd,
+}: {
+  wf: WorkflowDefinition;
+  agentsById: Map<string, Agent>;
+  onSelect: (phaseId: string) => void;
+  onAdd: () => void;
+}) {
+  const [open, setOpen] = useState(true);
+  const skills = wf.phases.filter((p) => (p.kind === "agent" || !p.kind) && p.id !== "__director__");
+
+  // Group by derived category
+  const byCategory = new Map<SkillCategory, WorkflowPhase[]>();
+  for (const s of skills) {
+    const a = s.agent_id ? agentsById.get(s.agent_id) : null;
+    const cat = deriveSkillCategory(s, a ? { name: a.name, role: a.role } : null);
+    if (!byCategory.has(cat)) byCategory.set(cat, []);
+    byCategory.get(cat)!.push(s);
+  }
+
+  return (
+    <CollapsibleSection
+      open={open}
+      onToggle={() => setOpen((o) => !o)}
+      title={t("section.skills.title")}
+      summary={t(skills.length === 1 ? "section.skills.summary_one" : "section.skills.summary_many", { count: skills.length })}
+      icon="🧑‍💻"
+    >
+      {SKILL_CATEGORY_ORDER.map((cat) => {
+        const list = byCategory.get(cat);
+        if (!list || list.length === 0) return null;
+        return (
+          <div key={cat} style={{ marginTop: 8 }}>
+            <div style={{ fontSize: 11, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>
+              {SKILL_CATEGORY_LABEL[cat]}
+            </div>
+            {list.map((p) => {
+              const a = p.agent_id ? agentsById.get(p.agent_id) : null;
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => onSelect(p.id)}
+                  className="row-card"
+                  style={{ width: "100%", textAlign: "left" }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                    <div>
+                      <code style={{ background: "var(--gray-soft)", padding: "1px 6px", borderRadius: 4, fontSize: 11 }}>{p.id}</code>
+                      <span style={{ marginLeft: 8, fontWeight: 500 }}>{a?.name ?? "(missing agent)"}</span>
+                      {a?.model && <span style={{ marginLeft: 6, fontSize: 11, color: "var(--text-dim)" }}>· {a.model}</span>}
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                      {p.notes ? "📝 has notes · " : ""}{p.retry_target ? `↻ ${p.retry_target}` : ""}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        );
+      })}
+      <button onClick={onAdd} style={{ marginTop: 10 }}>+ {t("btn.add_skill")}</button>
+    </CollapsibleSection>
+  );
+}
+
+/**
+ * Gates panel — deterministic checks (shell tasks, approval, etc.).
+ */
+function GatesPanel({
+  wf,
+  onSelect,
+  onAddTask,
+  onAddApproval,
+}: {
+  wf: WorkflowDefinition;
+  onSelect: (phaseId: string) => void;
+  onAddTask: (type: string) => void;
+  onAddApproval: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const gates = wf.phases.filter((p) => p.kind === "task" || p.kind === "command" || p.kind === "approval");
+  return (
+    <CollapsibleSection
+      open={open}
+      onToggle={() => setOpen((o) => !o)}
+      title={t("section.gates.title")}
+      summary={t(gates.length === 1 ? "section.gates.summary_one" : "section.gates.summary_many", { count: gates.length })}
+      icon="🛡"
+    >
+      {gates.length === 0 && (
+        <div style={{ color: "var(--text-dim)", padding: "8px 0" }}>
+          {t("section.gates.empty")}
+        </div>
+      )}
+      {gates.map((p) => {
+        const taskType = p.kind === "task" ? p.task?.type : p.kind === "approval" ? "approval" : "shell";
+        const meta = TASK_TYPES[taskType ?? "shell"];
+        return (
+          <button
+            key={p.id}
+            onClick={() => onSelect(p.id)}
+            className="row-card"
+            style={{ width: "100%", textAlign: "left" }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+              <div>
+                <span style={{
+                  display: "inline-block", width: 22, height: 22, lineHeight: "22px",
+                  textAlign: "center", borderRadius: 4, marginRight: 8,
+                  background: meta?.color ?? (p.kind === "approval" ? "#f59e0b" : "#666"),
+                  color: "#fff", fontSize: 11,
+                }}>{meta?.icon ?? (p.kind === "approval" ? "⏸" : "?")}</span>
+                <code style={{ background: "var(--gray-soft)", padding: "1px 6px", borderRadius: 4, fontSize: 11 }}>{p.id}</code>
+                <span style={{ marginLeft: 8, fontSize: 11, color: "var(--text-dim)" }}>
+                  {p.kind === "approval" ? "approval" : (meta?.label ?? taskType)}
+                </span>
+              </div>
+            </div>
+          </button>
+        );
+      })}
+      <div style={{ position: "relative", marginTop: 10 }}>
+        <button onClick={() => setAddOpen((o) => !o)}>+ {t("btn.add_gate")}</button>
+        {addOpen && (
+          <div className="wf-popover" style={{ position: "absolute", top: "100%", left: 0, marginTop: 4, zIndex: 10 }}>
+            {Object.entries(TASK_TYPES).map(([key, meta]) => (
+              <button
+                key={key}
+                onClick={() => { onAddTask(key); setAddOpen(false); }}
+              >
+                <span className="pop-icon" style={{ background: meta.color }}>{meta.icon}</span>
+                {meta.label}
+              </button>
+            ))}
+            <button onClick={() => { onAddApproval(); setAddOpen(false); }}>
+              <span className="pop-icon" style={{ background: "#f59e0b" }}>⏸</span>
+              Approval gate
+            </button>
+          </div>
+        )}
+      </div>
+    </CollapsibleSection>
+  );
+}
+
+/**
+ * Teams panel — capability groupings of agents. Director sees teams as a
+ * separate axis from skills ("which team handles this?").
+ */
+function TeamsPanel({
+  wf,
+  agents,
+  onChange,
+}: {
+  wf: WorkflowDefinition;
+  agents: Agent[];
+  onChange: (updater: (next: WorkflowDefinition) => void) => void;
+}) {
+  // Closed by default so the playbook tab doesn't open as a wall of panels.
+  // The Skills panel above is the one that's open on first visit.
+  const [open, setOpen] = useState(false);
+  // null = closed; "new" = create mode; <id> = edit existing.
+  const [editing, setEditing] = useState<null | "new" | string>(null);
+  const teams = wf.teams ?? [];
+  const editingTeam = typeof editing === "string" && editing !== "new"
+    ? teams.find((tm) => tm.id === editing) ?? null
+    : null;
+
+  return (
+    <CollapsibleSection
+      open={open}
+      onToggle={() => setOpen((o) => !o)}
+      title={t("section.teams.title")}
+      summary={t(teams.length === 1 ? "section.teams.summary_one" : "section.teams.summary_many", { count: teams.length })}
+      icon="👥"
+    >
+      {teams.length === 0 && (
+        <div style={{ color: "var(--text-dim)", padding: "8px 0" }}>
+          {t("section.teams.empty")}
+        </div>
+      )}
+      <TeamsFlowDiagram
+        teams={teams}
+        playbooks={wf.playbooks ?? []}
+        onCardClick={(id) => setEditing(id)}
+        onAddClick={() => setEditing("new")}
+      />
+      {editing && (
+        <TeamEditModal
+          mode={editing === "new" ? "create" : "edit"}
+          initial={editingTeam}
+          agents={agents}
+          existingIds={teams.map((tm) => tm.id)}
+          onClose={() => setEditing(null)}
+          onSave={(team) => {
+            onChange((next) => {
+              if (!next.teams) next.teams = [];
+              const idx = next.teams.findIndex((tm) => tm.id === team.id);
+              if (idx >= 0) next.teams[idx] = team;
+              else next.teams.push(team);
+            });
+            setEditing(null);
+          }}
+          onDelete={editing !== "new" ? () => {
+            onChange((next) => { next.teams = (next.teams ?? []).filter((tm) => tm.id !== editing); });
+            setEditing(null);
+          } : undefined}
+        />
+      )}
+    </CollapsibleSection>
+  );
+}
+
+/**
+ * TeamEditModal — single-purpose dialog for creating or editing a team.
+ * Replaces the old inline form (which fought with the flow diagram for
+ * attention). Members picked via chip toggles; auto-generates a stable id
+ * from the name on create.
+ */
+function TeamEditModal({
+  mode,
+  initial,
+  agents,
+  existingIds,
+  onClose,
+  onSave,
+  onDelete,
+}: {
+  mode: "create" | "edit";
+  initial: Team | null;
+  agents: Agent[];
+  existingIds: string[];
+  onClose: () => void;
+  onSave: (team: Team) => void;
+  onDelete?: () => void;
+}) {
+  useEscClose(onClose);
+  const [name, setName] = useState(initial?.name ?? "");
+  const [description, setDescription] = useState(initial?.description ?? "");
+  const [category, setCategory] = useState<SkillCategory | "">(initial?.category ?? "");
+  const [memberNames, setMemberNames] = useState<string[]>(initial?.agent_names ?? []);
+
+  function genId(fromName: string): string {
+    const base = fromName.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "team";
+    if (!existingIds.includes(base)) return base;
+    let n = 2;
+    while (existingIds.includes(`${base}_${n}`)) n++;
+    return `${base}_${n}`;
+  }
+
+  const canSave = name.trim().length > 0;
+
+  function save() {
+    if (!canSave) return;
+    onSave({
+      id: initial?.id ?? genId(name),
+      name: name.trim(),
+      description: description.trim() || undefined,
+      category: category || undefined,
+      agent_names: memberNames,
+    });
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal" role="dialog" aria-modal="true"
+        onClick={(e) => e.stopPropagation()}
+        style={{ width: "min(620px, 95vw)" }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <h3 style={{ margin: 0 }}>{mode === "create" ? t("team.modal.new") : t("team.modal.edit", { name: initial?.name ?? "" })}</h3>
+          <button
+            onClick={onClose}
+            style={{ background: "transparent", border: 0, fontSize: 20, cursor: "pointer", color: "var(--text-dim)" }}
+            title="Close (Esc)"
+          >×</button>
+        </div>
+        <div className="form-row">
+          <label>{t("team.modal.name")}</label>
+          <input
+            value={name}
+            placeholder={t("team.modal.name_placeholder")}
+            onChange={(e) => setName(e.target.value)}
+            autoFocus
+          />
+        </div>
+        <div className="form-row">
+          <label>{t("team.modal.category")}</label>
+          <select value={category} onChange={(e) => setCategory(e.target.value as SkillCategory | "")}>
+            <option value="">{t("team.modal.no_category")}</option>
+            {SKILL_CATEGORY_ORDER.map((c) => (
+              <option key={c} value={c}>{SKILL_CATEGORY_LABEL[c]}</option>
+            ))}
+          </select>
+        </div>
+        <div className="form-row">
+          <label>{t("team.modal.description")}</label>
+          <input
+            value={description}
+            placeholder={t("team.modal.description_placeholder")}
+            onChange={(e) => setDescription(e.target.value)}
+          />
+        </div>
+        <div className="form-row">
+          <label>{t("team.modal.members", { count: memberNames.length })}</label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: 8, background: "var(--bg)", borderRadius: 6, border: "1px solid var(--border)" }}>
+            {agents.map((a) => {
+              const member = memberNames.includes(a.name);
+              return (
+                <button
+                  key={a.id}
+                  type="button"
+                  onClick={() => setMemberNames(
+                    member
+                      ? memberNames.filter((n) => n !== a.name)
+                      : [...memberNames, a.name],
+                  )}
+                  style={{
+                    fontSize: 12, padding: "4px 10px", borderRadius: 14,
+                    background: member ? "#7c3aed" : "var(--bg-elev)",
+                    color: member ? "#fff" : "var(--text)",
+                    border: `1px solid ${member ? "#7c3aed" : "var(--border)"}`,
+                  }}
+                >
+                  <span style={{ marginRight: 4, opacity: 0.8 }}>{ROLE_GLYPH[a.role] ?? "·"}</span>
+                  {a.name}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "space-between", marginTop: 16 }}>
+          <div>
+            {onDelete && (
+              <button
+                className="danger"
+                onClick={() => { if (confirm(t("confirm.delete_team", { name: initial?.name ?? "" }))) onDelete(); }}
+              >{t("team.modal.delete")}</button>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={onClose}>{t("common.cancel")}</button>
+            <button className="primary" onClick={save} disabled={!canSave}>
+              {mode === "create" ? t("team.modal.create") : t("common.save")}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * TeamsFlowDiagram — renders teams as a horizontal flow with arrows showing
+ * the typical work transitions between teams.
+ *
+ * The arrows are inferred from named Playbooks: each consecutive pair of
+ * steps (step[i] → step[i+1]) becomes a directional handoff from the team
+ * owning step[i]'s agent to the team owning step[i+1]'s agent. Aggregating
+ * across all Playbooks gives "this is how work flows in this project."
+ */
+function TeamsFlowDiagram({
+  teams,
+  playbooks,
+  onCardClick,
+  onAddClick,
+}: {
+  teams: Team[];
+  playbooks: Playbook[];
+  onCardClick?: (id: string) => void;
+  onAddClick?: () => void;
+}) {
+  // Sort teams in canonical category order.
+  const sorted = useMemo(
+    () => [...teams].sort((a, b) => {
+      const ai = SKILL_CATEGORY_ORDER.indexOf(a.category ?? "general");
+      const bi = SKILL_CATEGORY_ORDER.indexOf(b.category ?? "general");
+      return ai - bi;
+    }),
+    [teams],
+  );
+
+  return (
+    <div style={{
+      padding: "14px 12px",
+      background: "var(--bg)",
+      border: "1px solid var(--border)",
+      borderRadius: 8,
+      overflowX: "auto",
+    }}>
+      <div style={{ fontSize: 10, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10 }}>
+        {t("team.flow.title")}
+      </div>
+      <div style={{ display: "flex", alignItems: "stretch", gap: 0, minWidth: "fit-content" }}>
+        {sorted.map((team, i) => (
+          <div key={team.id} style={{ display: "flex", alignItems: "center" }}>
+            <TeamCard team={team} onClick={onCardClick ? () => onCardClick(team.id) : undefined} />
+            {i < sorted.length - 1 && (
+              <div style={{
+                fontSize: 18, color: "var(--text-dim)",
+                padding: "0 10px", alignSelf: "center",
+              }}>→</div>
+            )}
+          </div>
+        ))}
+        {onAddClick && (
+          <div style={{ display: "flex", alignItems: "center" }}>
+            {sorted.length > 0 && (
+              <div style={{
+                fontSize: 18, color: "var(--text-dim)",
+                padding: "0 10px", alignSelf: "center", opacity: 0.5,
+              }}>→</div>
+            )}
+            <button
+              onClick={onAddClick}
+              title="Add team"
+              style={{
+                flex: "0 0 auto", minWidth: 100, minHeight: 90,
+                padding: 10,
+                background: "transparent",
+                border: "2px dashed var(--border)",
+                borderRadius: 10,
+                color: "var(--text-dim)",
+                fontSize: 13, cursor: "pointer",
+                display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4,
+              }}
+            >
+              <span style={{ fontSize: 24 }}>+</span>
+              <span style={{ fontSize: 11 }}>{t("team.flow.add")}</span>
+            </button>
+          </div>
+        )}
+      </div>
+      {playbooks.length > 0 && (
+        <div style={{ marginTop: 12, fontSize: 11, color: "var(--text-dim)" }}>
+          <span style={{ marginRight: 8 }}>{t("team.flow.recipes")}</span>
+          {playbooks.map((pb, i) => (
+            <span key={pb.name} style={{
+              display: "inline-block", padding: "2px 8px", borderRadius: 10,
+              background: "var(--bg-elev)", border: "1px solid var(--border)",
+              marginRight: 6, marginBottom: 4,
+            }}>
+              {pb.name} <span style={{ opacity: 0.6 }}>· {t("team.flow.steps", { count: pb.steps.length })}</span>
+              {i < playbooks.length - 1 ? "" : ""}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TeamCard({
+  team,
+  onClick,
+}: {
+  team: Team;
+  onClick?: () => void;
+}) {
+  const cat = team.category ?? "general";
+  // Single source of truth for category color is in CSS (var(--cat-*)) so
+  // any tweak there flows through every chip / pill / lane / flow chip.
+  const color = `var(--cat-${cat})`;
+  const Tag = onClick ? "button" : "div";
+  return (
+    <Tag
+      onClick={onClick}
+      title={onClick ? "Click to edit" : undefined}
+      style={{
+      flex: "0 0 auto",
+      minWidth: 160, maxWidth: 200,
+      padding: 10,
+      background: "var(--bg-elev)",
+      border: `2px solid ${color}`,
+      borderRadius: 10,
+      position: "relative",
+      textAlign: "left",
+      cursor: onClick ? "pointer" : "default",
+      transition: "transform 80ms ease",
+    }}
+      onMouseEnter={onClick ? (e) => { (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)"; } : undefined}
+      onMouseLeave={onClick ? (e) => { (e.currentTarget as HTMLElement).style.transform = ""; } : undefined}
+    >
+      <div style={{
+        position: "absolute", top: -8, left: 10,
+        background: "var(--bg)", padding: "0 6px",
+        fontSize: 10, color, fontWeight: 700,
+        textTransform: "uppercase", letterSpacing: 0.5,
+      }}>
+        {SKILL_CATEGORY_LABEL[cat as SkillCategory] ?? cat}
+      </div>
+      <div style={{ fontWeight: 600, marginBottom: 4, fontSize: 13 }}>{team.name}</div>
+      {team.description && (
+        <div style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 6, lineHeight: 1.3 }}>
+          {team.description.length > 70 ? team.description.slice(0, 70) + "…" : team.description}
+        </div>
+      )}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
+        {team.agent_names.map((n) => (
+          <span key={n} style={{
+            fontSize: 10, padding: "1px 6px", borderRadius: 8,
+            background: `color-mix(in srgb, ${color} 10%, transparent)`, color, border: `1px solid color-mix(in srgb, ${color} 35%, transparent)`,
+          }}>{n}</span>
+        ))}
+        {team.agent_names.length === 0 && (
+          <span style={{ fontSize: 10, color: "var(--text-dim)", fontStyle: "italic" }}>no members</span>
+        )}
+      </div>
+    </Tag>
+  );
+}
+
+function CollapsibleSection({
+  open,
+  onToggle,
+  title,
+  summary,
+  icon,
+  children,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  title: string;
+  summary: string;
+  icon: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={{ border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-elev)" }}>
+      <button
+        onClick={onToggle}
+        style={{
+          width: "100%", padding: "10px 14px",
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          background: "transparent", border: 0, color: "var(--text)", cursor: "pointer",
+          textAlign: "left", fontSize: 13,
+        }}
+      >
+        <span><span style={{ marginRight: 8 }}>{icon}</span><b>{title}</b> <span style={{ color: "var(--text-dim)", fontWeight: 400 }}>· {summary}</span></span>
+        <span style={{ color: "var(--text-dim)" }}>{open ? "▾" : "▸"}</span>
+      </button>
+      {open && <div style={{ padding: "0 14px 12px", borderTop: "1px solid var(--border)" }}>{children}</div>}
+    </div>
+  );
 }
 
 interface ToolbarProps {
@@ -806,7 +1585,8 @@ function WorkflowFloatingToolbar(props: ToolbarProps) {
   );
 }
 
-export function WorkflowEditor({ project, tickets }: Props) {
+export function WorkflowEditor({ project, tickets, onChanged }: Props) {
+  useLang(); // re-render on language change
   const [wf, setWf] = useState<WorkflowDefinition | null>(null);
   const [nodes, setNodes] = useState<Node<PhaseNodeData>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
@@ -818,6 +1598,10 @@ export function WorkflowEditor({ project, tickets }: Props) {
   const [dirty, setDirty] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
   const [showSaveTemplate, setShowSaveTemplate] = useState(false);
+  const [showLegacyGraph, setShowLegacyGraph] = useState(false);
+  const [bannerDismissed, setBannerDismissed] = useState(() => {
+    try { return localStorage.getItem("ceo.banner.director.dismissed") === "1"; } catch { return false; }
+  });
 
   // Track dragging so we don't repeatedly write positions to wf during a drag.
   const draggingNodeId = useRef<string | null>(null);
@@ -870,9 +1654,16 @@ export function WorkflowEditor({ project, tickets }: Props) {
   const updateWf = useCallback((mut: (next: WorkflowDefinition) => void) => {
     setWf((cur) => {
       if (!cur) return cur;
+      // Deep-clone everything mut() might touch. Phases are clonePhase'd because
+      // they have nested task.config / approval / director objects. Teams,
+      // playbooks, and director_config use structuredClone — they're plain
+      // JSON, not class instances.
       const next: WorkflowDefinition = {
+        ...cur,
         phases: cur.phases.map(clonePhase),
-        project_specifics: cur.project_specifics ?? null,
+        teams: cur.teams ? structuredClone(cur.teams) : undefined,
+        playbooks: cur.playbooks ? structuredClone(cur.playbooks) : undefined,
+        director_config: cur.director_config ? structuredClone(cur.director_config) : cur.director_config,
       };
       mut(next);
       return next;
@@ -985,7 +1776,7 @@ export function WorkflowEditor({ project, tickets }: Props) {
   }, [selectedPhaseId]);
 
   if (err) return <div style={{ color: "var(--red)" }}>{err}</div>;
-  if (!wf) return <div style={{ color: "var(--text-dim)" }}>Loading workflow…</div>;
+  if (!wf) return <div style={{ color: "var(--text-dim)" }}>Loading playbook…</div>;
   if (project.agents.length === 0) {
     return (
       <div style={{ color: "var(--text-dim)" }}>
@@ -1092,7 +1883,7 @@ export function WorkflowEditor({ project, tickets }: Props) {
   }
 
   async function reset() {
-    if (!confirm("Reset workflow to default (one phase per agent role)?")) return;
+    if (!confirm(t("confirm.reset_playbook"))) return;
     setBusy(true);
     setInfo(null);
     try {
@@ -1106,7 +1897,73 @@ export function WorkflowEditor({ project, tickets }: Props) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "calc(100vh - 240px)", minHeight: 500 }}>
-      <div className="wf-canvas-wrap">
+      {!bannerDismissed && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: 12,
+          padding: "8px 14px", marginBottom: -4,
+          background: "rgba(124, 58, 237, 0.06)",
+          border: "1px solid rgba(124, 58, 237, 0.18)",
+          borderRadius: 8, fontSize: 12, color: "var(--text-dim)",
+        }}>
+          <span style={{ fontSize: 16 }}>🎬</span>
+          <span style={{ flex: 1 }}>
+            <b style={{ color: "#7c3aed" }}>{t("banner.director_orchestrates")}</b>{" "}
+            {t("banner.director_explains")}
+          </span>
+          <button
+            onClick={() => {
+              try { localStorage.setItem("ceo.banner.director.dismissed", "1"); } catch {}
+              setBannerDismissed(true);
+            }}
+            style={{ fontSize: 11, alignSelf: "flex-start", marginTop: 2 }}
+          >{t("banner.dismiss")}</button>
+        </div>
+      )}
+      <SpecialistsSection project={project} onChanged={onChanged} />
+      <SkillsPanel
+        wf={wf}
+        agentsById={agentsById}
+        onSelect={(id) => setSelectedPhaseId(id)}
+        onAdd={addPhase}
+      />
+      <GatesPanel
+        wf={wf}
+        onSelect={(id) => setSelectedPhaseId(id)}
+        onAddTask={addTaskPhase}
+        onAddApproval={addApprovalPhase}
+      />
+      <TeamsPanel
+        wf={wf}
+        agents={project.agents}
+        onChange={(updater) => updateWf(updater)}
+      />
+      <NamedPlaybooksPanel
+        wf={wf}
+        agentsById={agentsById}
+        onChange={(updater) => updateWf(updater)}
+      />
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4, flexWrap: "wrap" }}>
+        <button onClick={save} disabled={busy || !dirty} className={dirty ? "primary" : ""}>
+          {busy ? t("common.saving") : dirty ? t("common.dirty") : t("common.saved")}
+        </button>
+        <button onClick={() => setShowTemplates(true)} disabled={busy}>{t("btn.apply_template")}</button>
+        <button onClick={() => setShowSaveTemplate(true)} disabled={busy}>{t("btn.save_as_template")}</button>
+        <button onClick={reset} disabled={busy}>{t("btn.reset_default")}</button>
+        <label style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-dim)", display: "flex", alignItems: "center", gap: 4 }}>
+          <input
+            type="checkbox"
+            checked={showLegacyGraph}
+            onChange={(e) => setShowLegacyGraph(e.target.checked)}
+          />
+          {t("common.show_legacy_graph")}
+        </label>
+        {info && <span style={{ fontSize: 11, color: "var(--green)" }}>{info}</span>}
+        {err && <span style={{ fontSize: 11, color: "var(--red)" }}>{err}</span>}
+      </div>
+
+      {showLegacyGraph && (
+      <div className="wf-canvas-wrap" style={{ minHeight: 500 }}>
         <WorkflowFloatingToolbar
           busy={busy}
           dirty={dirty}
@@ -1116,7 +1973,7 @@ export function WorkflowEditor({ project, tickets }: Props) {
           onAddTask={addTaskPhase}
           onAddApproval={addApprovalPhase}
           onAutoArrange={() => {
-            const positions = autoArrange(wf!);
+            const positions = autoArrange(wf!, agentsById);
             updateWf((next) => {
               next.phases.forEach((p) => {
                 const pos = positions.get(p.id);
@@ -1196,11 +2053,12 @@ export function WorkflowEditor({ project, tickets }: Props) {
           Click any edge + Delete to disconnect.
         </div>
       </div>
+      )}
 
       <div className="settings-section" style={{ marginBottom: 0 }}>
-        <h3>Project specifics for this workflow</h3>
+        <h3>{t("settings.project_specifics")}</h3>
         <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 6 }}>
-          Markdown injected into <em>every</em> agent's prompt during runs of this project.
+          {t("settings.project_specifics_hint")}
         </div>
         <textarea
           value={wf.project_specifics ?? ""}
@@ -1217,7 +2075,7 @@ export function WorkflowEditor({ project, tickets }: Props) {
 
       {selected && (
         <div className="modal-backdrop" onClick={() => setSelectedPhaseId(null)}>
-          <div className="phase-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="phase-modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             <div className="phase-modal-header">
               <h3>
                 Phase
@@ -1287,6 +2145,7 @@ export function WorkflowEditor({ project, tickets }: Props) {
                     approval: selected.approval ?? { message: "Review and approve to continue." },
                     agent_id: undefined,
                     task: undefined,
+                    director: undefined,
                     routes: null,
                     command: undefined,
                     working_dir: undefined,
@@ -1301,8 +2160,8 @@ export function WorkflowEditor({ project, tickets }: Props) {
                 {selected.kind === "approval"
                   ? "Pauses the run until you click Approve / Reject in the run view."
                   : getTaskKindForPhase(selected) !== null
-                  ? "Deterministic action — no AI, no tokens. ok=true → next; ok=false → retry target."
-                  : "AI agent step. Verdict drives next/retry/route."}
+                  ? "Gate — deterministic check (no AI, no tokens). Director runs it on demand; ok=true unblocks mark_done."
+                  : "Skill — AI specialist Director can dispatch. Verdict drives Director's next decision."}
               </div>
             </div>
             <div className="form-row">
@@ -1325,7 +2184,102 @@ export function WorkflowEditor({ project, tickets }: Props) {
                 }}
               />
             </div>
-            {selected.kind === "approval" ? (
+            {selected.kind !== "director" && (() => {
+              const selectedAgent = selected.agent_id ? agentsById.get(selected.agent_id) : null;
+              const derived = deriveSkillCategory(selected, selectedAgent ? { name: selectedAgent.name, role: selectedAgent.role } : null);
+              return (
+                <div className="form-row">
+                  <label>category</label>
+                  <select
+                    value={selected.category ?? ""}
+                    onChange={(e) => updatePhase(selected.id, {
+                      category: (e.target.value || undefined) as SkillCategory | undefined,
+                    })}
+                  >
+                    <option value="">auto ({SKILL_CATEGORY_LABEL[derived]})</option>
+                    {SKILL_CATEGORY_ORDER.map((c) => (
+                      <option key={c} value={c}>{SKILL_CATEGORY_LABEL[c]}</option>
+                    ))}
+                  </select>
+                  <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+                    Capability group. Director sees skills grouped by category, not by edge order. Auto-derived from agent role/name when blank.
+                  </div>
+                </div>
+              );
+            })()}
+            {selected.kind === "director" ? (
+              <>
+                <div className="form-row">
+                  <label>budget (USD)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    step={0.5}
+                    value={selected.director?.budget_usd ?? 8}
+                    onChange={(e) => updatePhase(selected.id, {
+                      director: { ...(selected.director ?? {}), budget_usd: Number(e.target.value) },
+                    })}
+                  />
+                  <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+                    Hard cap on total Director + sub-agent cost. Run aborts when reached.
+                  </div>
+                </div>
+                <div className="form-row">
+                  <label>max iterations</label>
+                  <input
+                    type="number"
+                    min={3}
+                    max={50}
+                    value={selected.director?.max_iterations ?? 12}
+                    onChange={(e) => updatePhase(selected.id, {
+                      director: { ...(selected.director ?? {}), max_iterations: Number(e.target.value) },
+                    })}
+                  />
+                  <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+                    Director decision turns before forced abort. Each turn ≈ one sub-agent dispatch + Director think.
+                  </div>
+                </div>
+                <div className="form-row">
+                  <label>project brief (appended to Director's system prompt)</label>
+                  <textarea
+                    value={selected.director?.project_brief ?? ""}
+                    onChange={(e) => updatePhase(selected.id, {
+                      director: { ...(selected.director ?? {}), project_brief: e.target.value || null },
+                    })}
+                    rows={5}
+                    placeholder="e.g. PHP project with FrankenPHP. Tests run via composer ci in Docker. Lexik JWT for api auth, X-Internal-Token for plant-api. Default locale cs, fallback for de-DE."
+                    style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+                  />
+                </div>
+                <div className="form-row">
+                  <label>available sub-agents (comma-separated, blank = all)</label>
+                  <input
+                    value={(selected.director?.available_subagents ?? []).join(", ")}
+                    onChange={(e) => {
+                      const list = e.target.value.split(",").map((s) => s.trim()).filter(Boolean);
+                      updatePhase(selected.id, {
+                        director: { ...(selected.director ?? {}), available_subagents: list.length === 0 ? undefined : list },
+                      });
+                    }}
+                    placeholder="PHP Junior Coder, PHP Senior Coder, Reviewer, DevOps Engineer, Tester"
+                    style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+                  />
+                  <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+                    Names of project agents Director may dispatch. Empty = all (excluding CTO + Memory Curator).
+                  </div>
+                </div>
+                <div style={{
+                  marginTop: 8, padding: 8, fontSize: 11,
+                  background: "rgba(124, 58, 237, 0.08)",
+                  border: "1px solid rgba(124, 58, 237, 0.25)",
+                  borderRadius: 6,
+                  color: "#7c3aed",
+                }}>
+                  Director is a <b>terminal phase</b>. It handles its own iteration internally — no <code>next</code>, no <code>retry_target</code>. Run ends when Director calls mark_done / give_up / request_decompose, or budget/iterations exhausted.
+                </div>
+              </>
+            ) : selected.kind === "approval" ? (
               <div className="form-row">
                 <label>approval message (markdown, shown to the approver)</label>
                 <textarea
@@ -1381,62 +2335,18 @@ export function WorkflowEditor({ project, tickets }: Props) {
                 </select>
               </div>
             )}
-            <div className="form-row">
-              <label>next phase (on success)</label>
-              <select
-                value={selected.next ?? ""}
-                onChange={(e) => updatePhase(selected.id, { next: e.target.value || null })}
-              >
-                <option value="">(none — workflow ends)</option>
-                {wf.phases
-                  .filter((p) => p.id !== selected.id)
-                  .map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.id} ({getTaskKindForPhase(p) ?? (p.agent_id ? agentsById.get(p.agent_id)?.role ?? "?" : "?")})
-                    </option>
-                  ))}
-              </select>
-            </div>
             {getTaskKindForPhase(selected) === null && (
               <div className="form-row">
-                <label>conditional routes (verdict.route → phase)</label>
-                <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>
-                  If the agent's verdict has a <code>route</code> string matching one of these keys,
-                  the engine jumps to the mapped phase instead of using <code>next</code>.
-                </div>
-                <RoutesEditor
-                  phase={selected}
-                  phases={wf.phases}
-                  onChange={(routes) => updatePhase(selected.id, { routes })}
+                <label>notes (appended to this skill's prompt every time it runs)</label>
+                <textarea
+                  value={selected.notes ?? ""}
+                  onChange={(e) => updatePhase(selected.id, { notes: e.target.value || null })}
+                  rows={5}
+                  placeholder="e.g. Focus on security review for this phase."
+                  style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
                 />
               </div>
             )}
-            <div className="form-row">
-              <label>retry target (when verdict.ok=false)</label>
-              <select
-                value={selected.retry_target ?? ""}
-                onChange={(e) => updatePhase(selected.id, { retry_target: e.target.value || null })}
-              >
-                <option value="">(none)</option>
-                {wf.phases
-                  .filter((p) => p.id !== selected.id)
-                  .map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.id} ({getTaskKindForPhase(p) ?? (p.agent_id ? agentsById.get(p.agent_id)?.role ?? "?" : "?")})
-                    </option>
-                  ))}
-              </select>
-            </div>
-            <div className="form-row">
-              <label>max attempts</label>
-              <input
-                type="number"
-                min={1}
-                max={5}
-                value={selected.max_attempts ?? 2}
-                onChange={(e) => updatePhase(selected.id, { max_attempts: Number(e.target.value) })}
-              />
-            </div>
             {getTaskKindForPhase(selected) === null && (
               <div className="form-row">
                 <label>agent timeout (seconds, 0 = none, max 3600)</label>
@@ -1448,34 +2358,85 @@ export function WorkflowEditor({ project, tickets }: Props) {
                   onChange={(e) => updatePhase(selected.id, { timeout_sec: Number(e.target.value) || undefined })}
                 />
                 <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
-                  If the agent runs longer than this, it's killed and the verdict becomes ok=false (so retry kicks in).
+                  Hard cap on a single dispatch. If exceeded, sub-agent is killed and Director sees ok=false.
                 </div>
               </div>
             )}
-            {getTaskKindForPhase(selected) === null && (
+            <details style={{ marginTop: 12, padding: "8px 10px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6 }}>
+              <summary style={{ cursor: "pointer", fontSize: 12, color: "var(--text-dim)" }}>
+                ▸ Graph hints (advisory — only visible to Director when planning)
+              </summary>
+              <div style={{ fontSize: 11, color: "var(--text-dim)", margin: "6px 0 10px" }}>
+                These are hints Director sees as "common follow-up" / "on-fail escalation" / conditional routing.
+                Director respects retry/routes more than next, and can override any of them. Useful when you want
+                to push a default ordering; safe to leave empty in most cases.
+              </div>
               <div className="form-row">
-                <label>phase notes (appended to this phase's prompt)</label>
-                <textarea
-                  value={selected.notes ?? ""}
-                  onChange={(e) => updatePhase(selected.id, { notes: e.target.value || null })}
-                  rows={5}
-                  placeholder="e.g. Focus on security review for this phase."
-                  style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+                <label>common follow-up</label>
+                <select
+                  value={selected.next ?? ""}
+                  onChange={(e) => updatePhase(selected.id, { next: e.target.value || null })}
+                >
+                  <option value="">(none)</option>
+                  {wf.phases
+                    .filter((p) => p.id !== selected.id)
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.id} ({getTaskKindForPhase(p) ?? (p.agent_id ? agentsById.get(p.agent_id)?.role ?? "?" : "?")})
+                      </option>
+                    ))}
+                </select>
+              </div>
+              <div className="form-row">
+                <label>on-fail escalate to</label>
+                <select
+                  value={selected.retry_target ?? ""}
+                  onChange={(e) => updatePhase(selected.id, { retry_target: e.target.value || null })}
+                >
+                  <option value="">(none)</option>
+                  {wf.phases
+                    .filter((p) => p.id !== selected.id)
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.id} ({getTaskKindForPhase(p) ?? (p.agent_id ? agentsById.get(p.agent_id)?.role ?? "?" : "?")})
+                      </option>
+                    ))}
+                </select>
+              </div>
+              <div className="form-row">
+                <label>max attempts (legacy retry budget; Director ignores)</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={5}
+                  value={selected.max_attempts ?? 2}
+                  onChange={(e) => updatePhase(selected.id, { max_attempts: Number(e.target.value) })}
                 />
               </div>
-            )}
+              {getTaskKindForPhase(selected) === null && (
+                <div className="form-row">
+                  <label>conditional routes (verdict.route → phase) — legacy</label>
+                  <RoutesEditor
+                    phase={selected}
+                    phases={wf.phases}
+                    onChange={(routes) => updatePhase(selected.id, { routes })}
+                  />
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                <button onClick={() => movePhase(selected.id, -1)} style={{ fontSize: 11 }}>↑ Up</button>
+                <button onClick={() => movePhase(selected.id, 1)} style={{ fontSize: 11 }}>↓ Down</button>
+                <button
+                  onClick={() => updatePhase(selected.id, { position: null })}
+                  title="Forget the saved canvas position; auto-layout will re-place it."
+                  style={{ fontSize: 11 }}
+                >Reset graph position</button>
+              </div>
+            </details>
             </div>
             <div className="phase-modal-footer">
-              <button onClick={() => movePhase(selected.id, -1)}>↑ Up</button>
-              <button onClick={() => movePhase(selected.id, 1)}>↓ Down</button>
-              <button
-                onClick={() => updatePhase(selected.id, { position: null })}
-                title="Forget the saved canvas position; auto-layout will re-place it."
-              >
-                Reset position
-              </button>
-              <div style={{ flex: 1 }} />
               <button className="danger" onClick={() => { deletePhase(selected.id); setSelectedPhaseId(null); }}>Delete</button>
+              <div style={{ flex: 1 }} />
               <button className="primary" onClick={() => setSelectedPhaseId(null)}>Done</button>
             </div>
           </div>
@@ -1519,6 +2480,7 @@ interface TemplatePickerModalProps {
 }
 
 function TemplatePickerModal({ projectId, onClose, onApplied }: TemplatePickerModalProps) {
+  useEscClose(onClose);
   const [list, setList] = useState<WorkflowPreset[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -1527,15 +2489,17 @@ function TemplatePickerModal({ projectId, onClose, onApplied }: TemplatePickerMo
   }, []);
 
   async function apply(key: string) {
-    if (!confirm(
-      "Apply this template? It will REPLACE the current workflow and add any missing agents " +
-      "(existing agents with the same name are kept).",
-    )) return;
+    if (!confirm(t("confirm.apply_template"))) return;
     setBusy(key);
     setErr(null);
     try {
       const r = await api.applyWorkflowPreset(projectId, key);
-      alert(`Applied: +${r.agents_added} agent(s), ${r.agents_existing} kept, ${r.phases} phases.`);
+      alert(
+        `Applied: +${r.agents_added} agent(s), ${r.agents_existing} kept, ${r.phases} phases` +
+        (r.teams_added ? `, +${r.teams_added} team(s)` : "") +
+        (r.playbooks_added ? `, +${r.playbooks_added} playbook(s)` : "") +
+        ".",
+      );
       await onApplied();
     } catch (e: any) {
       setErr(e.message);
@@ -1559,8 +2523,8 @@ function TemplatePickerModal({ projectId, onClose, onApplied }: TemplatePickerMo
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" style={{ width: 720 }} onClick={(e) => e.stopPropagation()}>
-        <h3>Workflow templates</h3>
+      <div className="modal" role="dialog" aria-modal="true" style={{ width: 720 }} onClick={(e) => e.stopPropagation()}>
+        <h3>Playbook templates</h3>
         <p style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 0 }}>
           Apply a template to instantly clone a complete agent team + workflow into this project.
         </p>
@@ -1624,6 +2588,7 @@ interface SaveAsTemplateModalProps {
 }
 
 function SaveAsTemplateModal({ projectId, defaultKey, defaultName, onClose, onSaved }: SaveAsTemplateModalProps) {
+  useEscClose(onClose);
   const [key, setKey] = useState(defaultKey);
   const [name, setName] = useState(defaultName);
   const [description, setDescription] = useState("");
@@ -1650,8 +2615,8 @@ function SaveAsTemplateModal({ projectId, defaultKey, defaultName, onClose, onSa
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <form className="modal" style={{ width: 520 }} onClick={(e) => e.stopPropagation()} onSubmit={submit}>
-        <h3>Save as workflow template</h3>
+      <form className="modal" role="dialog" aria-modal="true" style={{ width: 520 }} onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+        <h3>Save as playbook template</h3>
         <p style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 0 }}>
           Captures the current workflow + the agents it references. Saved as a JSON file in
           <code> ~/.ceo/templates/</code>; can be applied to other projects.
