@@ -9,6 +9,7 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.95.1",
     "@ceo/shared": "*",
     "better-sqlite3": "^11.3.0",
     "cors": "^2.8.5",

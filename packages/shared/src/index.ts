@@ -146,6 +146,7 @@ export type RunEventType =
   | "awaiting_approval" // approval-phase: paused, needs user click
   | "director_start"    // director-phase: begun
   | "director_decision" // director-phase: turn decided
+  | "director_thinking" // director-phase: streamed token delta from Director
   | "director_dispatch" // director-phase: sub-agent / ci_gate invoked
   | "director_subagent_done" // director-phase: sub-agent / ci_gate finished
   | "director_end"      // director-phase: terminated

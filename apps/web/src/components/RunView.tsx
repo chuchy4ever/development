@@ -359,6 +359,11 @@ const EVENT_RENDERERS: Record<string, (payload: any) => ReactNode> = {
       )}
     </div>
   ),
+  director_thinking: (p) => (
+    <span style={{ color: "var(--text-dim)", fontStyle: "italic", whiteSpace: "pre-wrap" }}>
+      {String(p?.text_delta ?? "")}
+    </span>
+  ),
   director_dispatch: (p) => (
     <span style={{ color: "#0ea5e9" }}>
       ↳ dispatching <b>{p?.subagent}</b>{p?.role ? ` (${p.role})` : ""}{p?.model ? ` · ${p.model}` : ""}
