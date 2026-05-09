@@ -90,19 +90,18 @@ export function AgentsView({ project, onChanged }: Props) {
   return (
     <div style={{ maxWidth: 900 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <h3 style={{ margin: 0 }}>Agents</h3>
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={() => setShowTemplates(true)} disabled={busy}>
             Add from template…
           </button>
           <button className="primary" onClick={() => setCreating(true)} disabled={busy}>
-            + New agent
+            + New specialist
           </button>
         </div>
       </div>
       <p style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 0 }}>
-        Agents are reusable definitions (role + system prompt + model + tools), grouped by category.
-        The Workflow tab connects them into a pipeline.
+        Specialist definitions: role + system prompt + model + tools. Compose them into Skills,
+        Teams, and Playbooks below; pull from the global Admin templates with "Add from template".
       </p>
 
       {grouped.length === 0 && (

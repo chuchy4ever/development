@@ -35,11 +35,15 @@ import {
   SKILL_CATEGORY_ORDER,
 } from "@ceo/shared";
 import { api } from "../api";
+import { AgentsView } from "./AgentsView";
 import { CodeEditorModal } from "./CodeEditorModal";
 
 interface Props {
   project: ProjectWithRepos;
   tickets?: Ticket[];
+  /** Callback to refresh project (incl. agents) after edits in the embedded
+   *  Specialists section. Provided by ProjectView. */
+  onChanged?: () => Promise<void>;
 }
 
 const ROLE_COLOR: Record<AgentRole, string> = {
@@ -871,6 +875,39 @@ function NamedPlaybooksPanel({
 /* ─────────────────────── Stacked-panels editor (no graph) ──────────────── */
 
 /**
+ * Specialists section — embeds the agent definition editor (formerly the
+ * standalone "Agents" tab). Closed by default; users only need to open it
+ * when adding/editing an agent's prompt or model. Day-to-day orchestration
+ * happens via the Skills/Gates/Teams/Playbooks sections below.
+ */
+function SpecialistsSection({
+  project,
+  onChanged,
+}: {
+  project: ProjectWithRepos;
+  onChanged?: () => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <CollapsibleSection
+      open={open}
+      onToggle={() => setOpen((o) => !o)}
+      title="Specialists"
+      summary={`${project.agents.length} agent definition${project.agents.length === 1 ? "" : "s"} (prompts, models, tools)`}
+      icon="🧠"
+    >
+      <div style={{ paddingTop: 8 }}>
+        <AgentsView
+          project={project}
+          onChanged={async () => { if (onChanged) await onChanged(); }}
+        />
+      </div>
+    </CollapsibleSection>
+  );
+}
+
+
+/**
  * Skills panel — agent phases as a flat list, grouped by capability category.
  * Replaces the graph canvas for skills. Each row opens the existing edit
  * modal on click. Add at the bottom.
@@ -1277,7 +1314,7 @@ function WorkflowFloatingToolbar(props: ToolbarProps) {
   );
 }
 
-export function WorkflowEditor({ project, tickets }: Props) {
+export function WorkflowEditor({ project, tickets, onChanged }: Props) {
   const [wf, setWf] = useState<WorkflowDefinition | null>(null);
   const [nodes, setNodes] = useState<Node<PhaseNodeData>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
@@ -1593,6 +1630,7 @@ export function WorkflowEditor({ project, tickets }: Props) {
           Solid arrows are escalation rules Director respects; dotted arrows are common follow-ups (advisory).
         </span>
       </div>
+      <SpecialistsSection project={project} onChanged={onChanged} />
       <SkillsPanel
         wf={wf}
         agentsById={agentsById}

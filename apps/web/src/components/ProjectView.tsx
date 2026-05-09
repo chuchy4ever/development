@@ -92,9 +92,6 @@ export function ProjectView({ project, route, navigate, onChanged, onDeleted }: 
         <div className={`tab ${tab === "board" ? "active" : ""}`} onClick={() => setTab("board")}>
           Board
         </div>
-        <div className={`tab ${tab === "agents" ? "active" : ""}`} onClick={() => setTab("agents")}>
-          Agents
-        </div>
         <div className={`tab ${tab === "workflow" ? "active" : ""}`} onClick={() => setTab("workflow")}>
           Playbook
         </div>
@@ -131,8 +128,8 @@ export function ProjectView({ project, route, navigate, onChanged, onDeleted }: 
             />
           </>
         )}
-        {tab === "agents" && <AgentsView project={project} onChanged={onChanged} />}
-        {tab === "workflow" && <WorkflowEditor project={project} tickets={tickets} />}
+        {/* "agents" route still parses for back-compat with old bookmarks; show the unified Playbook editor instead. */}
+        {(tab === "workflow" || tab === "agents") && <WorkflowEditor project={project} tickets={tickets} onChanged={onChanged} />}
         {tab === "memory" && <MemoryView project={project} />}
         {tab === "settings" && (
           <ProjectSettings
