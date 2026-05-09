@@ -1457,6 +1457,215 @@ function TeamCard({
 }
 
 /**
+ * Inline agent editor inside the Skill modal — renders the agent's
+ * definition fields (name, role, model, tools, prompt) directly in the
+ * skill editor. The user no longer needs a separate "Edit agent" button:
+ * skill = agent (with project-specific notes/category/retry on top).
+ *
+ * Behavior:
+ *  - agent dropdown lets you point this skill at a different agent (rare
+ *    but supported — e.g. switch reviewer for a stricter variant).
+ *  - editable fields debounce-save to api.updateAgent. If the agent is
+ *    referenced by other phases, a small "shared with N skills" warning
+ *    appears so the user knows the change propagates locally.
+ *  - if the agent is library-linked (template_key set), all definition
+ *    fields are disabled and a 📚 banner sends the user to admin instead.
+ */
+function SkillAgentEditor({
+  phase,
+  project,
+  onPickAgent,
+  onAgentSaved,
+}: {
+  phase: WorkflowPhase;
+  project: ProjectWithRepos;
+  onPickAgent: (agentId: string) => void;
+  onAgentSaved: () => Promise<void>;
+}) {
+  const agent = phase.agent_id ? project.agents.find((a) => a.id === phase.agent_id) ?? null : null;
+  const fromLibrary = !!agent?.template_key;
+  // Count phases that reference this same agent — informs the user that
+  // editing here propagates to those siblings too.
+  const sharedCount = agent
+    ? project.workflow.phases.filter((p) => p.agent_id === agent.id && p.id !== phase.id).length
+    : 0;
+
+  // Local edit state mirrors the agent's fields. We commit to the server
+  // when the user blurs a field (or types and pauses for 700 ms) so the
+  // Done button doesn't have to coordinate two saves.
+  const [name, setName] = useState(agent?.name ?? "");
+  const [role, setRole] = useState<AgentRole>(agent?.role ?? "coder");
+  const [model, setModel] = useState(agent?.model ?? "");
+  const [toolsCsv, setToolsCsv] = useState((agent?.allowed_tools ?? []).join(", "));
+  const [systemPrompt, setSystemPrompt] = useState(agent?.system_prompt ?? "");
+  const [savingState, setSavingState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [saveErr, setSaveErr] = useState<string | null>(null);
+
+  // When the picker switches the underlying agent, refresh the local fields.
+  useEffect(() => {
+    setName(agent?.name ?? "");
+    setRole(agent?.role ?? "coder");
+    setModel(agent?.model ?? "");
+    setToolsCsv((agent?.allowed_tools ?? []).join(", "));
+    setSystemPrompt(agent?.system_prompt ?? "");
+    setSavingState("idle");
+    setSaveErr(null);
+  }, [agent?.id]);
+
+  // Debounced patch.
+  const dirtyRef = useRef(false);
+  useEffect(() => {
+    if (!agent || fromLibrary) return;
+    // Skip the initial sync triggered by the effect above.
+    const same = name === (agent.name ?? "")
+      && role === agent.role
+      && (model || null) === (agent.model ?? null)
+      && toolsCsv === (agent.allowed_tools ?? []).join(", ")
+      && systemPrompt === agent.system_prompt;
+    if (same) return;
+    dirtyRef.current = true;
+    const t = window.setTimeout(async () => {
+      setSavingState("saving");
+      setSaveErr(null);
+      try {
+        const tools = toolsCsv.trim()
+          ? toolsCsv.split(",").map((s) => s.trim()).filter(Boolean)
+          : null;
+        await api.updateAgent(project.id, agent.id, {
+          name: name.trim(),
+          role,
+          category: agent.category,
+          system_prompt: systemPrompt,
+          model: model.trim() || null,
+          allowed_tools: tools,
+        });
+        await onAgentSaved();
+        setSavingState("saved");
+        dirtyRef.current = false;
+      } catch (e: any) {
+        setSavingState("error");
+        setSaveErr(e?.message ?? String(e));
+      }
+    }, 700);
+    return () => window.clearTimeout(t);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name, role, model, toolsCsv, systemPrompt]);
+
+  if (!agent) {
+    return (
+      <div className="form-row">
+        <label>Agent</label>
+        <select
+          value={phase.agent_id ?? ""}
+          onChange={(e) => onPickAgent(e.target.value)}
+        >
+          <option value="">(missing — pick one)</option>
+          {project.agents
+            .filter((a) => !INTERNAL_AGENT_NAMES.has(a.name))
+            .map((a) => (
+              <option key={a.id} value={a.id}>{a.name} ({a.role})</option>
+            ))}
+        </select>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {fromLibrary && (
+        <div style={{
+          padding: "8px 12px", borderRadius: 6,
+          background: "rgba(14, 165, 233, 0.08)",
+          border: "1px solid rgba(14, 165, 233, 0.3)",
+          fontSize: 12, color: "#0369a1",
+          display: "flex", alignItems: "center", gap: 8,
+          marginBottom: 12,
+        }}>
+          <span style={{ fontSize: 16 }}>📚</span>
+          <span style={{ flex: 1 }}>
+            From global library (<code>{agent.template_key}</code>) — definition is read-only here. Edit in <b>Admin → Skill templates</b>.
+          </span>
+          <button
+            type="button"
+            onClick={() => { window.location.hash = "#/admin/templates"; }}
+          >Open in Admin</button>
+        </div>
+      )}
+      {!fromLibrary && sharedCount > 0 && (
+        <div style={{
+          padding: "6px 10px", borderRadius: 6,
+          background: "rgba(245, 158, 11, 0.08)",
+          border: "1px solid rgba(245, 158, 11, 0.3)",
+          fontSize: 11, color: "#92400e",
+          marginBottom: 12,
+        }}>
+          🔗 This agent is also used by {sharedCount} other skill{sharedCount === 1 ? "" : "s"} in this project — edits propagate.
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6, fontSize: 11, color: "var(--text-dim)" }}>
+        <span>Switch agent for this skill:</span>
+        <select
+          value={agent.id}
+          onChange={(e) => onPickAgent(e.target.value)}
+          style={{ flex: 1, fontSize: 12 }}
+        >
+          {project.agents
+            .filter((a) => !INTERNAL_AGENT_NAMES.has(a.name))
+            .map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name} ({a.role}{a.model ? `, ${a.model}` : ""}{a.template_key ? ` · 📚 ${a.template_key}` : ""})
+              </option>
+            ))}
+        </select>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 8 }}>
+        <div className="form-row">
+          <label>Name</label>
+          <input value={name} disabled={fromLibrary} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div className="form-row">
+          <label>Role</label>
+          <select value={role} disabled={fromLibrary} onChange={(e) => setRole(e.target.value as AgentRole)}>
+            <option value="coder">coder</option>
+            <option value="reviewer">reviewer</option>
+            <option value="tester">tester</option>
+          </select>
+        </div>
+        <div className="form-row">
+          <label>Model</label>
+          <input value={model} disabled={fromLibrary} onChange={(e) => setModel(e.target.value)} placeholder="(default)" />
+        </div>
+      </div>
+      <div className="form-row">
+        <label>Allowed tools (CSV)</label>
+        <input
+          value={toolsCsv}
+          disabled={fromLibrary}
+          onChange={(e) => setToolsCsv(e.target.value)}
+          placeholder="Read, Edit, Bash, Grep, Glob"
+        />
+      </div>
+      <div className="form-row">
+        <label>
+          System prompt
+          {savingState === "saving" && <span style={{ marginLeft: 8, fontSize: 10, color: "var(--text-dim)" }}>saving…</span>}
+          {savingState === "saved" && <span style={{ marginLeft: 8, fontSize: 10, color: "var(--green)" }}>✓ saved</span>}
+          {savingState === "error" && <span style={{ marginLeft: 8, fontSize: 10, color: "var(--red)" }}>error</span>}
+        </label>
+        <textarea
+          value={systemPrompt}
+          disabled={fromLibrary}
+          onChange={(e) => setSystemPrompt(e.target.value)}
+          rows={10}
+          style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+        />
+        {saveErr && <div style={{ fontSize: 11, color: "var(--red)", marginTop: 4 }}>{saveErr}</div>}
+      </div>
+    </>
+  );
+}
+
+/**
  * Picker for global Skill templates (admin library). Imports create a
  * library-linked agent (template_key set) + auto-create a phase using
  * the template's default_notes and default_skill_category.
@@ -1730,7 +1939,6 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
   // When set, opens the AgentForm modal in edit mode for this agent id —
   // launched from inside the Skill modal so the user can tweak the agent's
   // prompt/model/tools without leaving the playbook editor.
-  const [editAgentId, setEditAgentId] = useState<string | null>(null);
   // When true, opens AgentForm in create mode for "+ New specialist & skill".
   const [creatingNewAgent, setCreatingNewAgent] = useState(false);
   // Library picker — pulls global Skill templates from admin.
@@ -2223,92 +2431,12 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
           <div className="phase-modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             <div className="phase-modal-header">
               <h3>
-                Phase
+                {getTaskKindForPhase(selected) !== null ? "Gate" : selected.kind === "approval" ? "Approval" : "Skill"}
                 <code style={{ background: "var(--gray-soft)", padding: "2px 8px", borderRadius: 6, fontSize: 13 }}>{selected.id}</code>
-                <span className={`kind-pill ${getTaskKindForPhase(selected) !== null ? "task" : "agent"}`}>
-                  {getTaskKindForPhase(selected) ?? "agent"}
-                </span>
               </h3>
               <button className="x-btn" onClick={() => setSelectedPhaseId(null)} title="Close (Esc)">×</button>
             </div>
             <div className="phase-modal-body">
-            <div className="form-row">
-              <label>type</label>
-              <div style={{ display: "flex", gap: 6 }}>
-                <button
-                  type="button"
-                  className={selected.kind !== "approval" && getTaskKindForPhase(selected) === null ? "primary" : ""}
-                  onClick={() => updatePhase(selected.id, {
-                    kind: "agent",
-                    agent_id: selected.agent_id ?? project.agents[0]?.id,
-                    task: undefined,
-                    approval: undefined,
-                    command: undefined,
-                    working_dir: undefined,
-                    timeout_sec: undefined,
-                  })}
-                  style={{ flex: 1 }}
-                >
-                  Agent
-                </button>
-                <button
-                  type="button"
-                  className={selected.kind !== "approval" && getTaskKindForPhase(selected) !== null ? "primary" : ""}
-                  onClick={() => {
-                    const existingType = getTaskKindForPhase(selected);
-                    const type = existingType ?? "shell";
-                    const meta = TASK_TYPES[type];
-                    const existingConfig = selected.kind === "task"
-                      ? (selected.task?.config ?? meta?.defaultConfig ?? {})
-                      : selected.kind === "command"
-                      ? {
-                          command: selected.command ?? "",
-                          ...(selected.working_dir !== undefined ? { working_dir: selected.working_dir } : {}),
-                          ...(selected.timeout_sec !== undefined ? { timeout_sec: selected.timeout_sec } : {}),
-                        }
-                      : (meta?.defaultConfig ?? {});
-                    updatePhase(selected.id, {
-                      kind: "task",
-                      task: { type, config: existingConfig },
-                      approval: undefined,
-                      agent_id: undefined,
-                      routes: null,
-                      command: undefined,
-                      working_dir: undefined,
-                      timeout_sec: undefined,
-                    });
-                  }}
-                  style={{ flex: 1 }}
-                >
-                  Task
-                </button>
-                <button
-                  type="button"
-                  className={selected.kind === "approval" ? "primary" : ""}
-                  onClick={() => updatePhase(selected.id, {
-                    kind: "approval",
-                    approval: selected.approval ?? { message: "Review and approve to continue." },
-                    agent_id: undefined,
-                    task: undefined,
-                    director: undefined,
-                    routes: null,
-                    command: undefined,
-                    working_dir: undefined,
-                    timeout_sec: undefined,
-                  })}
-                  style={{ flex: 1 }}
-                >
-                  Approval
-                </button>
-              </div>
-              <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
-                {selected.kind === "approval"
-                  ? "Pauses the run until you click Approve / Reject in the run view."
-                  : getTaskKindForPhase(selected) !== null
-                  ? "Gate — deterministic check (no AI, no tokens). Director runs it on demand; ok=true unblocks mark_done."
-                  : "Skill — AI specialist Director can dispatch. Verdict drives Director's next decision."}
-              </div>
-            </div>
             <div className="form-row">
               <label>id</label>
               <input
@@ -2466,34 +2594,12 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
                 }}
               />
             ) : (
-              <div className="form-row">
-                <label>{t("skill.modal.agent")}</label>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <select
-                    value={selected.agent_id ?? ""}
-                    onChange={(e) => updatePhase(selected.id, { agent_id: e.target.value })}
-                    style={{ flex: 1 }}
-                  >
-                    {project.agents
-                      .filter((a) => !INTERNAL_AGENT_NAMES.has(a.name))
-                      .map((a) => (
-                        <option key={a.id} value={a.id}>
-                          {a.name} ({a.role}{a.model ? `, ${a.model}` : ""})
-                        </option>
-                      ))}
-                  </select>
-                  {selected.agent_id && (
-                    <button
-                      type="button"
-                      onClick={() => setEditAgentId(selected.agent_id!)}
-                      title="Edit this agent's prompt / model / tools"
-                    >Edit agent</button>
-                  )}
-                </div>
-                <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
-                  Agent = the specialist (prompt + model + tools). Skill = how this project uses it (notes / category / retry below).
-                </div>
-              </div>
+              <SkillAgentEditor
+                phase={selected}
+                project={project}
+                onPickAgent={(id) => updatePhase(selected.id, { agent_id: id })}
+                onAgentSaved={async () => { if (onChanged) await onChanged(); }}
+              />
             )}
             {getTaskKindForPhase(selected) === null && (
               <div className="form-row">
@@ -2629,26 +2735,6 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
           }}
         />
       )}
-      {editAgentId && (() => {
-        const agent = project.agents.find((a) => a.id === editAgentId);
-        if (!agent) { setEditAgentId(null); return null; }
-        return (
-          <AgentForm
-            mode="edit"
-            initial={agent}
-            projectId={project.id}
-            onClose={() => setEditAgentId(null)}
-            onSubmit={async (input, memory) => {
-              await api.updateAgent(project.id, agent.id, input);
-              if (memory !== undefined) {
-                await api.putAgentMemory(project.id, agent.id, memory);
-              }
-              if (onChanged) await onChanged();
-              setEditAgentId(null);
-            }}
-          />
-        );
-      })()}
       {showLibraryPicker && (
         <LibrarySkillPicker
           templates={libraryTemplates}
