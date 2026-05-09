@@ -61,6 +61,7 @@ interface AgentRow {
   system_prompt: string;
   model: string | null;
   allowed_tools_json: string | null;
+  template_key: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -123,18 +124,43 @@ function parseWorkflow(s: string | null | undefined): WorkflowDefinition {
   }
 }
 
-export const toAgent = (r: AgentRow): Agent => ({
-  id: r.id,
-  project_id: r.project_id,
-  name: r.name,
-  role: r.role as Agent["role"],
-  category: r.category || "Development",
-  system_prompt: r.system_prompt,
-  model: r.model,
-  allowed_tools: r.allowed_tools_json ? safeParseJson<string[] | null>(r.allowed_tools_json, null) : null,
-  created_at: r.created_at,
-  updated_at: r.updated_at,
-});
+export const toAgent = (r: AgentRow): Agent => {
+  const base: Agent = {
+    id: r.id,
+    project_id: r.project_id,
+    name: r.name,
+    role: r.role as Agent["role"],
+    category: r.category || "Development",
+    system_prompt: r.system_prompt,
+    model: r.model,
+    allowed_tools: r.allowed_tools_json ? safeParseJson<string[] | null>(r.allowed_tools_json, null) : null,
+    template_key: r.template_key ?? null,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+  };
+  // Library overlay: when an agent is sourced from a global Skill template,
+  // mirror the current template's prompt/role/model/tools onto the project's
+  // agent. Edits to the template in admin propagate to every project on the
+  // next read. Local DB row is still the fallback when the template was
+  // deleted from the library.
+  if (r.template_key) {
+    try {
+      // Lazy require to avoid a cyclic import at module load time.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { getAgentTemplate } = require("./agentTemplates.js") as typeof import("./agentTemplates.js");
+      const tpl = getAgentTemplate(r.template_key);
+      if (tpl) {
+        base.role = tpl.role;
+        base.system_prompt = tpl.system_prompt;
+        base.model = tpl.model ?? base.model;
+        base.allowed_tools = tpl.allowed_tools ?? base.allowed_tools;
+        // Keep the agent's local name/category — those identify the slot
+        // inside the project even if the template gets renamed in admin.
+      }
+    } catch { /* template loader unavailable / template missing — fall back to local fields */ }
+  }
+  return base;
+};
 
 export const toRepo = (r: RepoRow): Repo => ({
   id: r.id,

@@ -1,14 +1,19 @@
 import { nanoid } from "nanoid";
-import type { AgentTemplate, WorkflowDefinition } from "@ceo/shared";
+import type { AgentTemplate, WorkflowDefinition, WorkflowPhase } from "@ceo/shared";
 import { db, nowIso } from "./db.js";
-import { AGENT_TEMPLATES, CORE_TEMPLATES } from "./defaultAgents.js";
+import { CORE_TEMPLATES } from "./defaultAgents.js";
+import { getAgentTemplate } from "./agentTemplates.js";
 
-function insertAgentFromTemplate(projectId: string, tpl: AgentTemplate): string {
+function insertAgentFromTemplate(projectId: string, tpl: AgentTemplate, opts?: { linkToLibrary?: boolean }): string {
   const id = nanoid(10);
   const now = nowIso();
+  // linkToLibrary = true sets template_key, making the project agent a
+  // live mirror of the admin template. Default false for the auto-seed
+  // (those are starting points, not library-linked) and true when a user
+  // explicitly imports from the library picker.
   db.prepare(
-    `INSERT INTO agents (id, project_id, name, role, category, system_prompt, model, allowed_tools_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO agents (id, project_id, name, role, category, system_prompt, model, allowed_tools_json, template_key, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     projectId,
@@ -18,6 +23,7 @@ function insertAgentFromTemplate(projectId: string, tpl: AgentTemplate): string 
     tpl.system_prompt,
     tpl.model,
     tpl.allowed_tools ? JSON.stringify(tpl.allowed_tools) : null,
+    opts?.linkToLibrary ? tpl.key : null,
     now,
     now,
   );
@@ -51,17 +57,55 @@ export function ensureDefaultAgents(projectId: string): boolean {
 }
 
 /**
- * Add a single template into the project. Returns inserted agent id, or null
- * if an agent with that name already exists.
+ * Add a single template into the project — explicit user import from the
+ * library. Stores `template_key` on the agent (=> field overlay on read,
+ * locked UI in project) and auto-creates a phase that uses it, populated
+ * with the template's default notes / category.
+ *
+ * Returns inserted agent id, or null if an agent with that name already
+ * exists.
  */
 export function addAgentFromTemplate(projectId: string, key: string): string | null {
-  const tpl = AGENT_TEMPLATES.find((t) => t.key === key);
+  const tpl = getAgentTemplate(key);
   if (!tpl) throw new Error(`unknown template "${key}"`);
   const dup = db
     .prepare("SELECT 1 FROM agents WHERE project_id = ? AND name = ?")
     .get(projectId, tpl.name);
   if (dup) return null;
-  return insertAgentFromTemplate(projectId, tpl);
+  const agentId = insertAgentFromTemplate(projectId, tpl, { linkToLibrary: true });
+
+  // Auto-create a phase referencing the new agent so the user lands in a
+  // coherent state (an agent without a phase isn't visible in the playbook).
+  const projectRow = db.prepare("SELECT workflow_json FROM projects WHERE id = ?")
+    .get(projectId) as { workflow_json: string } | undefined;
+  if (!projectRow) return agentId;
+  let wf: WorkflowDefinition;
+  try {
+    wf = JSON.parse(projectRow.workflow_json) as WorkflowDefinition;
+  } catch {
+    wf = { phases: [] };
+  }
+  if (!Array.isArray(wf.phases)) wf.phases = [];
+
+  // Generate a stable phase id from the template key (fall back to suffix
+  // on collision so re-import doesn't blow up).
+  let phaseId = key.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "skill";
+  let n = 2;
+  while (wf.phases.some((p) => p.id === phaseId)) phaseId = `${key}_${n++}`;
+
+  const newPhase: WorkflowPhase = {
+    id: phaseId,
+    kind: "agent",
+    agent_id: agentId,
+    notes: tpl.default_notes ?? null,
+    category: tpl.default_skill_category,
+    next: null,
+    position: { x: 60 + wf.phases.length * 200, y: 240 },
+  };
+  wf.phases.push(newPhase);
+  db.prepare(`UPDATE projects SET workflow_json = ?, updated_at = ? WHERE id = ?`)
+    .run(JSON.stringify(wf), nowIso(), projectId);
+  return agentId;
 }
 
 /**

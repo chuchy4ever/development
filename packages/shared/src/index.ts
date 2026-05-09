@@ -163,6 +163,12 @@ export interface Agent {
   system_prompt: string;
   model: string | null;
   allowed_tools: string[] | null;
+  /** When set, this agent is sourced from a global Skill template (library).
+   *  The server overlays the latest template fields on read so edits made in
+   *  Admin propagate to every project sharing the template. UI locks the
+   *  agent's editable fields when this is set; the link points the user back
+   *  to the admin template editor. Null/undefined = fully local agent. */
+  template_key?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -222,7 +228,13 @@ export const SKILL_CATEGORY_LABEL: Record<SkillCategory, string> = {
   general: "General",
 };
 
-/** A pre-defined agent template the user can instantiate into a project. */
+/** A pre-defined agent template the user can instantiate into a project.
+ *  Conceptually a "Skill template" in the library — admin defines the
+ *  specialist (prompt + model + tools) plus default notes/category that get
+ *  copied into the phase on import. Project-side agents that came from a
+ *  template carry `template_key` and become read-only in the project — the
+ *  UI redirects edits back to the admin library so changes propagate to all
+ *  projects sharing the template. */
 export interface AgentTemplate {
   key: string;                  // stable identifier
   name: string;
@@ -232,6 +244,11 @@ export interface AgentTemplate {
   system_prompt: string;
   model: string | null;
   allowed_tools: string[] | null;
+  /** Default notes appended to the prompt every time this skill runs in
+   *  a project (still overrideable per phase). Optional. */
+  default_notes?: string | null;
+  /** Default capability bucket for the auto-created phase on import. */
+  default_skill_category?: SkillCategory;
   /** If true, this template is auto-seeded into every new project. */
   core: boolean;
 }

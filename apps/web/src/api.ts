@@ -149,6 +149,15 @@ export const api = {
     req<void>(`/api/projects/${projectId}/agents/${agentId}`, { method: "DELETE" }),
   listAgentTemplates: () =>
     req<AgentTemplate[]>(`/api/agent-templates`),
+  getAgentTemplate: (key: string) =>
+    req<AgentTemplate>(`/api/agent-templates/${key}`),
+  saveAgentTemplate: (key: string, tpl: AgentTemplate) =>
+    req<AgentTemplate>(`/api/agent-templates/${key}`, {
+      method: "PUT",
+      body: JSON.stringify(tpl),
+    }),
+  resetAgentTemplate: (key: string) =>
+    req<void>(`/api/agent-templates/${key}`, { method: "DELETE" }),
   addAgentFromTemplate: (projectId: string, key: string) =>
     req<Agent>(`/api/projects/${projectId}/agents/from-template/${key}`, {
       method: "POST",

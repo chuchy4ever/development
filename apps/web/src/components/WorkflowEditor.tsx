@@ -22,6 +22,7 @@ import type {
   ActiveRunSummary,
   Agent,
   AgentRole,
+  AgentTemplate,
   Playbook,
   ProjectWithRepos,
   SkillCategory,
@@ -897,6 +898,7 @@ function SkillsPanel({
   onSelect,
   onAdd,
   onAddNew,
+  onImportLibrary,
   onAgentsChanged,
 }: {
   wf: WorkflowDefinition;
@@ -906,6 +908,7 @@ function SkillsPanel({
   onSelect: (phaseId: string) => void;
   onAdd: () => void;
   onAddNew: () => void;
+  onImportLibrary: () => void;
   onAgentsChanged: () => Promise<void>;
 }) {
   const [open, setOpen] = useState(true);
@@ -942,6 +945,7 @@ function SkillsPanel({
             </div>
             {list.map((p) => {
               const a = p.agent_id ? agentsById.get(p.agent_id) : null;
+              const fromLibrary = !!a?.template_key;
               return (
                 <button
                   key={p.id}
@@ -953,6 +957,13 @@ function SkillsPanel({
                     <div>
                       <code style={{ background: "var(--gray-soft)", padding: "1px 6px", borderRadius: 4, fontSize: 11 }}>{p.id}</code>
                       <span style={{ marginLeft: 8, fontWeight: 500 }}>{a?.name ?? "(missing agent)"}</span>
+                      {fromLibrary && (
+                        <span title={`Library template: ${a?.template_key}`} style={{
+                          marginLeft: 6, fontSize: 10, padding: "1px 6px", borderRadius: 8,
+                          background: "rgba(14, 165, 233, 0.12)", color: "#0369a1",
+                          border: "1px solid rgba(14, 165, 233, 0.3)",
+                        }}>📚 Library</span>
+                      )}
                       {a?.model && <span style={{ marginLeft: 6, fontSize: 11, color: "var(--text-dim)" }}>· {a.model}</span>}
                     </div>
                     <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
@@ -966,8 +977,13 @@ function SkillsPanel({
         );
       })}
       <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }}>
-        <button onClick={onAdd}>+ {t("btn.add_skill")}</button>
-        <button onClick={onAddNew} title="Create a new specialist (agent definition) and a skill that uses it">
+        <button onClick={onImportLibrary} className="primary" title="Import a skill from the global Admin library — locked to admin, propagates updates to all projects">
+          📚 Import from library
+        </button>
+        <button onClick={onAdd} title="Add a skill (phase) using an existing local agent">
+          + {t("btn.add_skill")}
+        </button>
+        <button onClick={onAddNew} title="Create a new local specialist (agent definition) for this project only">
           + {t("btn.add_specialist")}
         </button>
         {orphans.length > 0 && (
@@ -1440,6 +1456,111 @@ function TeamCard({
   );
 }
 
+/**
+ * Picker for global Skill templates (admin library). Imports create a
+ * library-linked agent (template_key set) + auto-create a phase using
+ * the template's default_notes and default_skill_category.
+ */
+function LibrarySkillPicker({
+  templates,
+  existingTemplateKeys,
+  existingNames,
+  onClose,
+  onImport,
+}: {
+  templates: AgentTemplate[];
+  existingTemplateKeys: Set<string>;
+  existingNames: Set<string>;
+  onClose: () => void;
+  onImport: (key: string) => Promise<void>;
+}) {
+  useEscClose(onClose);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  // Group by capability category — same axis Skills panel uses.
+  const byCat = new Map<SkillCategory, AgentTemplate[]>();
+  for (const tpl of templates) {
+    const cat = (tpl.default_skill_category as SkillCategory | undefined)
+      ?? deriveSkillCategory({ id: "x", kind: "agent" } as WorkflowPhase, { name: tpl.name, role: tpl.role });
+    if (!byCat.has(cat)) byCat.set(cat, []);
+    byCat.get(cat)!.push(tpl);
+  }
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal" role="dialog" aria-modal="true"
+        style={{ width: "min(720px, 95vw)", maxHeight: "85vh", display: "flex", flexDirection: "column" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <h3 style={{ margin: 0 }}>📚 Import skill from library</h3>
+          <button onClick={onClose} style={{ background: "transparent", border: 0, fontSize: 20, cursor: "pointer" }}>×</button>
+        </div>
+        <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 12 }}>
+          Imported skills are <b>locked in the project</b> — edit them in <b>Admin → Skill templates</b> so changes propagate to all projects sharing the template.
+        </div>
+        <div style={{ overflowY: "auto", flex: 1 }}>
+          {SKILL_CATEGORY_ORDER.map((cat) => {
+            const list = byCat.get(cat);
+            if (!list || list.length === 0) return null;
+            return (
+              <div key={cat} style={{ marginBottom: 16 }}>
+                <div style={{
+                  fontSize: 11, color: "var(--text-dim)", textTransform: "uppercase",
+                  letterSpacing: 0.5, marginBottom: 6,
+                }}>{SKILL_CATEGORY_LABEL[cat]}</div>
+                {list.map((tpl) => {
+                  const alreadyImported = existingTemplateKeys.has(tpl.key);
+                  const nameTaken = !alreadyImported && existingNames.has(tpl.name);
+                  return (
+                    <div
+                      key={tpl.key}
+                      style={{
+                        border: "1px solid var(--border)", borderRadius: 6,
+                        padding: 10, marginBottom: 6, background: "var(--bg)",
+                        opacity: alreadyImported || nameTaken ? 0.55 : 1,
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontWeight: 600 }}>
+                            {tpl.name}{" "}
+                            <span style={{ color: "var(--text-dim)", fontSize: 11, fontWeight: 400 }}>
+                              ({tpl.role}{tpl.model ? `, ${tpl.model}` : ""})
+                            </span>
+                          </div>
+                          {tpl.description && (
+                            <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 2 }}>
+                              {tpl.description}
+                            </div>
+                          )}
+                        </div>
+                        <button
+                          disabled={alreadyImported || nameTaken || busyKey !== null}
+                          onClick={async () => {
+                            setBusyKey(tpl.key);
+                            try { await onImport(tpl.key); } finally { setBusyKey(null); }
+                          }}
+                        >
+                          {alreadyImported ? "✓ imported" : nameTaken ? "name taken" : busyKey === tpl.key ? "…" : "Import"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+          {templates.length === 0 && (
+            <div style={{ color: "var(--text-dim)", padding: 20, textAlign: "center" }}>
+              No skill templates configured yet. Add some in Admin → Skill templates.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CollapsibleSection({
   open,
   onToggle,
@@ -1612,6 +1733,13 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
   const [editAgentId, setEditAgentId] = useState<string | null>(null);
   // When true, opens AgentForm in create mode for "+ New specialist & skill".
   const [creatingNewAgent, setCreatingNewAgent] = useState(false);
+  // Library picker — pulls global Skill templates from admin.
+  const [showLibraryPicker, setShowLibraryPicker] = useState(false);
+  const [libraryTemplates, setLibraryTemplates] = useState<AgentTemplate[]>([]);
+  useEffect(() => {
+    if (!showLibraryPicker) return;
+    api.listAgentTemplates().then(setLibraryTemplates).catch(() => {});
+  }, [showLibraryPicker]);
   const [bannerDismissed, setBannerDismissed] = useState(() => {
     try { return localStorage.getItem("ceo.banner.director.dismissed") === "1"; } catch { return false; }
   });
@@ -1940,6 +2068,7 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
         onSelect={(id) => setSelectedPhaseId(id)}
         onAdd={addPhase}
         onAddNew={() => setCreatingNewAgent(true)}
+        onImportLibrary={() => setShowLibraryPicker(true)}
         onAgentsChanged={async () => { if (onChanged) await onChanged(); }}
       />
       <GatesPanel
@@ -2520,6 +2649,27 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
           />
         );
       })()}
+      {showLibraryPicker && (
+        <LibrarySkillPicker
+          templates={libraryTemplates}
+          existingTemplateKeys={new Set(project.agents.map((a) => a.template_key).filter(Boolean) as string[])}
+          existingNames={new Set(project.agents.map((a) => a.name))}
+          onClose={() => setShowLibraryPicker(false)}
+          onImport={async (key) => {
+            try {
+              await api.addAgentFromTemplate(project.id, key);
+            } catch (e: any) {
+              alert(`Import failed: ${e.message}`);
+              return;
+            }
+            if (onChanged) await onChanged();
+            // Refresh workflow to show the new auto-created phase.
+            const fresh = await api.getWorkflow(project.id);
+            setWf(fresh);
+            setInfo(`📚 Imported "${key}" from library.`);
+          }}
+        />
+      )}
       {creatingNewAgent && (
         <AgentForm
           mode="create"

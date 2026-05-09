@@ -2,10 +2,17 @@ import { Router } from "express";
 import { nanoid } from "nanoid";
 import { db, nowIso } from "../db.js";
 import { listAgents, loadAgent, loadProjectWithRepos } from "../store.js";
-import { AGENT_TEMPLATES } from "../defaultAgents.js";
+import {
+  getAgentTemplate,
+  isBuiltin,
+  isUserOverride,
+  listAgentTemplates,
+  resetUserTemplate,
+  saveAgentTemplate,
+} from "../agentTemplates.js";
 import { addAgentFromTemplate } from "../seedAgents.js";
 import { deleteAgentMemory, readAgentMemory, writeAgentMemory } from "../agentMemory.js";
-import type { AgentRole, CreateAgentInput } from "@ceo/shared";
+import type { AgentRole, AgentTemplate, CreateAgentInput } from "@ceo/shared";
 
 export const agentsRouter = Router({ mergeParams: true });
 export const agentTemplatesRouter = Router();
@@ -66,6 +73,19 @@ agentsRouter.patch("/:id", (req, res) => {
   const agent = loadAgent(req.params.id);
   if (!agent || agent.project_id !== projectIdFrom(req)) {
     return res.status(404).json({ error: "not found" });
+  }
+  // Library-locked agents: editing the prompt/model/tools/role belongs in
+  // admin so changes propagate. Allow per-project tweaks of name/category
+  // only — those are slot-level metadata, not the specialist's definition.
+  if (agent.template_key) {
+    const input = req.body as Partial<CreateAgentInput>;
+    const allowedKeys = new Set(["name", "category"]);
+    const blocked = Object.keys(input).filter((k) => !allowedKeys.has(k));
+    if (blocked.length > 0) {
+      return res.status(409).json({
+        error: `agent "${agent.name}" is from the global library (template "${agent.template_key}"). Edit ${blocked.join(", ")} in Admin → Skill templates so the change propagates to all projects.`,
+      });
+    }
   }
   const input = req.body as Partial<CreateAgentInput>;
   if (input.role && !ROLES.includes(input.role)) {
@@ -160,5 +180,53 @@ agentsRouter.post("/from-template/:key", (req, res) => {
 // Global template catalog ----------------------------------------------------
 
 agentTemplatesRouter.get("/", (_req, res) => {
-  res.json(AGENT_TEMPLATES);
+  // Annotate each entry with its origin so the admin UI can show a
+  // "user-customized" / "built-in" / "user-defined" badge.
+  const list = listAgentTemplates().map((t) => ({
+    ...t,
+    is_builtin: isBuiltin(t.key),
+    is_user_override: isUserOverride(t.key),
+  }));
+  res.json(list);
+});
+
+agentTemplatesRouter.get("/:key", (req, res) => {
+  const t = getAgentTemplate(req.params.key);
+  if (!t) return res.status(404).json({ error: "template not found" });
+  res.json({ ...t, is_builtin: isBuiltin(t.key), is_user_override: isUserOverride(t.key) });
+});
+
+agentTemplatesRouter.put("/:key", (req, res) => {
+  const body = req.body as AgentTemplate;
+  if (!body?.name?.trim() || !body?.role || !body?.system_prompt?.trim()) {
+    return res.status(400).json({ error: "name, role, and system_prompt are required" });
+  }
+  if (!ROLES.includes(body.role)) {
+    return res.status(400).json({ error: `role must be one of ${ROLES.join(", ")}` });
+  }
+  const tpl: AgentTemplate = {
+    key: req.params.key,
+    name: body.name.trim(),
+    role: body.role,
+    category: body.category || "Development",
+    description: body.description ?? "",
+    system_prompt: body.system_prompt,
+    model: body.model ?? null,
+    allowed_tools: body.allowed_tools ?? null,
+    default_notes: body.default_notes ?? null,
+    default_skill_category: body.default_skill_category,
+    core: body.core ?? false,
+  };
+  try {
+    saveAgentTemplate(tpl);
+  } catch (e: any) {
+    return res.status(400).json({ error: e.message });
+  }
+  res.json(tpl);
+});
+
+agentTemplatesRouter.delete("/:key", (req, res) => {
+  const removed = resetUserTemplate(req.params.key);
+  if (!removed) return res.status(404).json({ error: "no user override to reset" });
+  res.status(204).end();
 });

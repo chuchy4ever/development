@@ -238,6 +238,10 @@ export function AgentForm({ mode, initial, projectId, onClose, onSubmit }: FormP
   const [memoryLoaded, setMemoryLoaded] = useState(mode === "create");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Library-locked agents: prompt/role/model/tools are mirrored from the
+  // admin template. Project may only edit the slot-level metadata
+  // (name, category) and the per-agent memory.
+  const fromLibrary = !!initial?.template_key;
 
   // Load this agent's memory when editing.
   useEffect(() => {
@@ -256,17 +260,20 @@ export function AgentForm({ mode, initial, projectId, onClose, onSubmit }: FormP
       const tools = toolsCsv.trim()
         ? toolsCsv.split(",").map((s) => s.trim()).filter(Boolean)
         : null;
-      await onSubmit(
-        {
-          name: name.trim(),
-          role,
-          category: category.trim() || "Development",
-          system_prompt: systemPrompt,
-          model: model.trim() || null,
-          allowed_tools: tools,
-        },
-        mode === "edit" ? memory : undefined,
-      );
+      // Library-locked: only send name + category. Server rejects writes to
+      // role / system_prompt / model / allowed_tools when template_key is set,
+      // so omitting them here matches that contract.
+      const payload = fromLibrary
+        ? { name: name.trim(), category: category.trim() || "Development" } as any
+        : {
+            name: name.trim(),
+            role,
+            category: category.trim() || "Development",
+            system_prompt: systemPrompt,
+            model: model.trim() || null,
+            allowed_tools: tools,
+          };
+      await onSubmit(payload, mode === "edit" ? memory : undefined);
     } catch (e: any) {
       setErr(e.message);
     } finally {
@@ -283,6 +290,20 @@ export function AgentForm({ mode, initial, projectId, onClose, onSubmit }: FormP
         onSubmit={submit}
       >
         <h3>{mode === "create" ? "New agent" : `Edit agent: ${initial?.name}`}</h3>
+        {fromLibrary && (
+          <div style={{
+            marginBottom: 12, padding: "8px 12px", borderRadius: 6,
+            background: "rgba(14, 165, 233, 0.08)",
+            border: "1px solid rgba(14, 165, 233, 0.3)",
+            fontSize: 12, color: "#0369a1",
+            display: "flex", alignItems: "center", gap: 8,
+          }}>
+            <span style={{ fontSize: 16 }}>📚</span>
+            <span style={{ flex: 1 }}>
+              From global library (<code>{initial?.template_key}</code>) — prompt, model, tools, role are read-only here. Edit them in <b>Admin → Skill templates</b> to update every project at once.
+            </span>
+          </div>
+        )}
         <div style={{ overflow: "auto", paddingRight: 4 }}>
           <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 8 }}>
             <div className="form-row">
@@ -291,7 +312,7 @@ export function AgentForm({ mode, initial, projectId, onClose, onSubmit }: FormP
             </div>
             <div className="form-row">
               <label>Role</label>
-              <select value={role} onChange={(e) => setRole(e.target.value as AgentRole)}>
+              <select value={role} disabled={fromLibrary} onChange={(e) => setRole(e.target.value as AgentRole)}>
                 {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
               </select>
             </div>
@@ -315,12 +336,13 @@ export function AgentForm({ mode, initial, projectId, onClose, onSubmit }: FormP
           </div>
           <div className="form-row">
             <label>Model (optional, e.g. claude-opus-4-7 / claude-sonnet-4-6 / claude-haiku-4-5-20251001)</label>
-            <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="leave empty for CLI default" />
+            <input value={model} disabled={fromLibrary} onChange={(e) => setModel(e.target.value)} placeholder="leave empty for CLI default" />
           </div>
           <div className="form-row">
             <label>Allowed tools (CSV, optional — leave empty for default tool set for this role)</label>
             <input
               value={toolsCsv}
+              disabled={fromLibrary}
               onChange={(e) => setToolsCsv(e.target.value)}
               placeholder="Read, Edit, Write, Bash, Grep, Glob"
             />
@@ -329,6 +351,7 @@ export function AgentForm({ mode, initial, projectId, onClose, onSubmit }: FormP
             <label>System prompt</label>
             <textarea
               value={systemPrompt}
+              disabled={fromLibrary}
               onChange={(e) => setSystemPrompt(e.target.value)}
               rows={14}
               style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}

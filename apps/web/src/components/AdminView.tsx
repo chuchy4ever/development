@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { WorkflowPreset } from "@ceo/shared";
+import type { AgentTemplate, WorkflowPreset } from "@ceo/shared";
 import { api } from "../api";
 import type { AdminSection, Route } from "../router";
 
@@ -323,6 +323,235 @@ function Templates() {
           </div>
         </div>
       )}
+
+      <div style={{ marginTop: 24 }}>
+        <SkillTemplatesAdmin />
+      </div>
+    </div>
+  );
+}
+
+// ---- Skill templates admin -------------------------------------------------
+
+/**
+ * Editor for global Skill (=agent) templates. Edits propagate to every
+ * project that has imported the template (template_key set on agent →
+ * server overlays template fields on read). Built-ins can be customized;
+ * "reset" deletes the user override file and falls back to the in-code
+ * built-in.
+ */
+function SkillTemplatesAdmin() {
+  const [list, setList] = useState<(AgentTemplate & { is_builtin?: boolean; is_user_override?: boolean })[]>([]);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function refresh() {
+    try {
+      const fresh = await api.listAgentTemplates() as any;
+      setList(fresh);
+    } catch (e: any) { setErr(e.message); }
+  }
+  useEffect(() => { refresh(); }, []);
+
+  return (
+    <div className="settings-section">
+      <h3 style={{ margin: 0, marginBottom: 12 }}>Skill templates (library)</h3>
+      <p style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 0, marginBottom: 12 }}>
+        Specialists shared across projects. Edits here propagate to every project that imported the template.
+        Built-ins can be customized; reset to revert to the version shipped with ceo.
+      </p>
+      {err && <div style={{ color: "var(--red)", fontSize: 12, marginBottom: 8 }}>{err}</div>}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {list.map((t) => (
+          <div key={t.key} style={{
+            display: "flex", alignItems: "center", gap: 12,
+            padding: "10px 12px", background: "var(--bg)",
+            border: "1px solid var(--border)", borderRadius: 6,
+            fontSize: 13,
+          }}>
+            <code style={{ background: "var(--gray-soft)", padding: "1px 6px", borderRadius: 4, fontSize: 11 }}>{t.key}</code>
+            <span style={{ flex: 1 }}>
+              <b>{t.name}</b>{" "}
+              <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
+                ({t.role}{t.model ? `, ${t.model}` : ""})
+              </span>
+            </span>
+            {t.is_user_override && (
+              <span title="Customized — overrides built-in" style={{
+                fontSize: 10, padding: "1px 6px", borderRadius: 8,
+                background: "rgba(245, 158, 11, 0.12)", color: "#92400e",
+                border: "1px solid rgba(245, 158, 11, 0.3)",
+              }}>customized</span>
+            )}
+            {!t.is_builtin && (
+              <span title="User-defined (not a built-in)" style={{
+                fontSize: 10, padding: "1px 6px", borderRadius: 8,
+                background: "rgba(124, 58, 237, 0.12)", color: "#5b21b6",
+                border: "1px solid rgba(124, 58, 237, 0.3)",
+              }}>user</span>
+            )}
+            <button onClick={() => setEditing(t.key)}>Edit</button>
+            {t.is_user_override && (
+              <button
+                onClick={async () => {
+                  if (!confirm(`Reset template "${t.key}" to built-in defaults?`)) return;
+                  try { await api.resetAgentTemplate(t.key); } catch (e: any) { alert(e.message); return; }
+                  refresh();
+                }}
+                title="Delete user override; revert to built-in"
+              >Reset</button>
+            )}
+          </div>
+        ))}
+      </div>
+      {editing && (
+        <SkillTemplateEditor
+          templateKey={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); refresh(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function SkillTemplateEditor({
+  templateKey,
+  onClose,
+  onSaved,
+}: {
+  templateKey: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [tpl, setTpl] = useState<AgentTemplate | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.getAgentTemplate(templateKey).then(setTpl).catch((e: any) => setErr(e.message));
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [templateKey, onClose]);
+
+  if (!tpl) {
+    return (
+      <div className="modal-backdrop" onClick={onClose}>
+        <div className="modal" role="dialog" aria-modal="true" style={{ width: 520 }} onClick={(e) => e.stopPropagation()}>
+          {err ? <div style={{ color: "var(--red)" }}>{err}</div> : <div>Loading…</div>}
+        </div>
+      </div>
+    );
+  }
+
+  async function save() {
+    if (!tpl) return;
+    setBusy(true); setErr(null);
+    try {
+      await api.saveAgentTemplate(templateKey, tpl);
+      onSaved();
+    } catch (e: any) { setErr(e.message); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal" role="dialog" aria-modal="true"
+        style={{ width: 720, maxHeight: "85vh", display: "flex", flexDirection: "column" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <h3 style={{ margin: 0 }}>Edit template: <code>{templateKey}</code></h3>
+          <button onClick={onClose} style={{ background: "transparent", border: 0, fontSize: 20, cursor: "pointer" }}>×</button>
+        </div>
+        <div style={{ overflow: "auto", paddingRight: 4 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 8 }}>
+            <div className="form-row">
+              <label>Name</label>
+              <input value={tpl.name} onChange={(e) => setTpl({ ...tpl, name: e.target.value })} />
+            </div>
+            <div className="form-row">
+              <label>Role</label>
+              <select value={tpl.role} onChange={(e) => setTpl({ ...tpl, role: e.target.value as AgentTemplate["role"] })}>
+                <option value="coder">coder</option>
+                <option value="reviewer">reviewer</option>
+                <option value="tester">tester</option>
+              </select>
+            </div>
+            <div className="form-row">
+              <label>Model</label>
+              <input value={tpl.model ?? ""} onChange={(e) => setTpl({ ...tpl, model: e.target.value || null })} placeholder="(default)" />
+            </div>
+          </div>
+          <div className="form-row">
+            <label>Description (1 line, shown in pickers)</label>
+            <input value={tpl.description ?? ""} onChange={(e) => setTpl({ ...tpl, description: e.target.value })} />
+          </div>
+          <div className="form-row">
+            <label>System prompt</label>
+            <textarea
+              value={tpl.system_prompt}
+              onChange={(e) => setTpl({ ...tpl, system_prompt: e.target.value })}
+              rows={14}
+              style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+            />
+          </div>
+          <div className="form-row">
+            <label>Allowed tools (CSV)</label>
+            <input
+              value={(tpl.allowed_tools ?? []).join(", ")}
+              onChange={(e) => setTpl({
+                ...tpl,
+                allowed_tools: e.target.value.trim()
+                  ? e.target.value.split(",").map((s) => s.trim()).filter(Boolean)
+                  : null,
+              })}
+              placeholder="Read, Edit, Bash, …"
+            />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <div className="form-row">
+              <label>Default skill category (used when imported)</label>
+              <select
+                value={tpl.default_skill_category ?? ""}
+                onChange={(e) => setTpl({ ...tpl, default_skill_category: (e.target.value || undefined) as any })}
+              >
+                <option value="">(auto)</option>
+                <option value="planning">Planning</option>
+                <option value="coding">Coding</option>
+                <option value="review">Review</option>
+                <option value="validation">Validation (gates)</option>
+                <option value="closing">Closing</option>
+                <option value="infra">Infra</option>
+                <option value="general">General</option>
+              </select>
+            </div>
+            <div className="form-row">
+              <label>Category (free text — agent definition)</label>
+              <input value={tpl.category} onChange={(e) => setTpl({ ...tpl, category: e.target.value })} />
+            </div>
+          </div>
+          <div className="form-row">
+            <label>Default notes (appended to every skill instance on import)</label>
+            <textarea
+              value={tpl.default_notes ?? ""}
+              onChange={(e) => setTpl({ ...tpl, default_notes: e.target.value || null })}
+              rows={4}
+              placeholder="(empty)"
+              style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+            />
+          </div>
+        </div>
+        {err && <div style={{ color: "var(--red)", fontSize: 12 }}>{err}</div>}
+        <div className="form-actions">
+          <button onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="primary" onClick={save} disabled={busy}>
+            {busy ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

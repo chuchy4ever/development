@@ -111,6 +111,7 @@ ensureColumn("runs", "current_phase_id", "current_phase_id TEXT");
 ensureColumn("runs", "attempts_by_phase_json", "attempts_by_phase_json TEXT");
 ensureColumn("runs", "reviewer_feedback", "reviewer_feedback TEXT");
 ensureColumn("projects", "daily_cost_cap_usd", "daily_cost_cap_usd REAL");
+ensureColumn("agents", "template_key", "template_key TEXT");
 
 export function nowIso(): string {
   return new Date().toISOString();
