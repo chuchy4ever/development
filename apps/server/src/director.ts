@@ -424,7 +424,7 @@ ${cfg.project_brief ? `## Project brief\n${cfg.project_brief}\n` : ""}
 
 ${playbook}
 
-The library above is organized by what each skill/gate does, not by step order. You decide which to use, in what sequence, based on the ticket. The "common follow-up" hints record what tends to come next, but you may skip, reorder, parallelize, or revisit. Always close with a Validation gate (ci_gate) before mark_done.
+The library above is organized by what each skill/gate does, not by step order. You decide which to use, in what sequence, based on the ticket. Always close with a Validation gate (ci_gate) before mark_done.
 
 ${playbookRegistry ? `## Named Playbooks (recipes for common problems)\n\n${playbookRegistry}\n\nWhen one of the named Playbooks matches the ticket, prefer use_playbook to walk it as a unit — it captures the team's known-good sequence for that problem class. You can still override or follow up with extra dispatches afterwards.\n` : ""}
 
@@ -544,11 +544,11 @@ function renderPlaybook(project: ProjectWithRepos): string {
       }
       sections.push(head);
       if (p.notes) sections.push(`    notes: ${p.notes.slice(0, 200)}${p.notes.length > 200 ? "…" : ""}`);
-      const flow: string[] = [];
-      if (p.next) flow.push(`common follow-up → ${p.next}`);
-      if (p.retry_target) flow.push(`on-fail escalate → ${p.retry_target} (max ${p.max_attempts ?? 2})`);
-      if (p.routes) flow.push(`routes: ${Object.entries(p.routes).map(([k, v]) => `${k}→${v}`).join(", ")}`);
-      if (flow.length) sections.push(`    ${flow.join("; ")}`);
+      // Note: next / retry_target / routes / max_attempts are no longer
+      // rendered. Those were graph-canvas hints; orchestration belongs to
+      // Playbooks (use_playbook) and code-level guardrails. Keeping the
+      // schema fields for back-compat with old workflows but they no
+      // longer leak into Director's prompt.
     }
     sections.push("");
   }
