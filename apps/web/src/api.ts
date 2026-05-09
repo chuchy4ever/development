@@ -1,0 +1,301 @@
+import type {
+  ActiveRunSummary,
+  Agent,
+  AgentTemplate,
+  ApplyTemplateResult,
+  BulkImportInput,
+  WorkflowPreset,
+  BulkImportResult,
+  CreateAgentInput,
+  CreateProjectInput,
+  CreateRepoInput,
+  CreateTicketInput,
+  Project,
+  ProjectWithRepos,
+  Run,
+  RunEvent,
+  SchedulerMode,
+  SchedulerStatus,
+  Ticket,
+  WorkflowDefinition,
+} from "@ceo/shared";
+
+async function req<T>(
+  url: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const res = await fetch(url, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(init.headers ?? {}),
+    },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`${res.status}: ${text}`);
+  }
+  if (res.status === 204) return undefined as T;
+  return res.json();
+}
+
+export const api = {
+  listProjects: () => req<Project[]>("/api/projects"),
+  getProject: (id: string) => req<ProjectWithRepos>(`/api/projects/${id}`),
+  createProject: (input: CreateProjectInput) =>
+    req<ProjectWithRepos>("/api/projects", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateProject: (id: string, input: Partial<CreateProjectInput>) =>
+    req<ProjectWithRepos>(`/api/projects/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  deleteProject: (id: string) =>
+    req<void>(`/api/projects/${id}`, { method: "DELETE" }),
+
+  addRepo: (projectId: string, input: CreateRepoInput) =>
+    req<ProjectWithRepos>(`/api/projects/${projectId}/repos`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  removeRepo: (projectId: string, repoId: string) =>
+    req<ProjectWithRepos>(`/api/projects/${projectId}/repos/${repoId}`, {
+      method: "DELETE",
+    }),
+
+  listTickets: (projectId: string) =>
+    req<Ticket[]>(`/api/projects/${projectId}/tickets`),
+  createTicket: (projectId: string, input: CreateTicketInput) =>
+    req<Ticket>(`/api/projects/${projectId}/tickets`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateTicket: (projectId: string, ticketId: string, input: Partial<Ticket>) =>
+    req<Ticket>(`/api/projects/${projectId}/tickets/${ticketId}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  deleteTicket: (projectId: string, ticketId: string) =>
+    req<void>(`/api/projects/${projectId}/tickets/${ticketId}`, {
+      method: "DELETE",
+    }),
+  triageTicket: (projectId: string, ticketId: string) =>
+    req<Ticket>(`/api/projects/${projectId}/tickets/${ticketId}/triage`, {
+      method: "POST",
+    }),
+  decomposeTicket: (projectId: string, ticketId: string) =>
+    req<{ decomposed: boolean; rationale: string; created: Ticket[] }>(
+      `/api/projects/${projectId}/tickets/${ticketId}/decompose`,
+      { method: "POST" },
+    ),
+
+  startRun: (projectId: string, ticketId: string) =>
+    req<Run>(`/api/projects/${projectId}/tickets/${ticketId}/runs`, {
+      method: "POST",
+    }),
+  getRun: (runId: string) => req<Run>(`/api/runs/${runId}`),
+  listActiveRuns: (projectId: string) =>
+    req<ActiveRunSummary[]>(`/api/projects/${projectId}/active-runs`),
+  listTicketRuns: (ticketId: string) =>
+    req<Run[]>(`/api/tickets/${ticketId}/runs`),
+  listRunEvents: (runId: string, since = 0) =>
+    req<(Omit<RunEvent, "payload"> & { payload: any })[]>(
+      `/api/runs/${runId}/events?since=${since}`,
+    ),
+  cancelRun: (runId: string) =>
+    req<Run>(`/api/runs/${runId}/cancel`, { method: "POST" }),
+  approveRun: (runId: string, note?: string) =>
+    req<Run>(`/api/runs/${runId}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    }),
+  rejectRun: (runId: string, note?: string) =>
+    req<Run>(`/api/runs/${runId}/reject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    }),
+  deleteRun: (runId: string) =>
+    req<void>(`/api/runs/${runId}`, { method: "DELETE" }),
+  listAgents: (projectId: string) =>
+    req<Agent[]>(`/api/projects/${projectId}/agents`),
+  createAgent: (projectId: string, input: CreateAgentInput) =>
+    req<Agent>(`/api/projects/${projectId}/agents`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateAgent: (projectId: string, agentId: string, input: Partial<CreateAgentInput>) =>
+    req<Agent>(`/api/projects/${projectId}/agents/${agentId}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  deleteAgent: (projectId: string, agentId: string) =>
+    req<void>(`/api/projects/${projectId}/agents/${agentId}`, { method: "DELETE" }),
+  listAgentTemplates: () =>
+    req<AgentTemplate[]>(`/api/agent-templates`),
+  addAgentFromTemplate: (projectId: string, key: string) =>
+    req<Agent>(`/api/projects/${projectId}/agents/from-template/${key}`, {
+      method: "POST",
+    }),
+  getAgentMemory: (projectId: string, agentId: string) =>
+    req<{ content: string }>(`/api/projects/${projectId}/agents/${agentId}/memory`),
+  putAgentMemory: (projectId: string, agentId: string, content: string) =>
+    req<{ content: string }>(`/api/projects/${projectId}/agents/${agentId}/memory`, {
+      method: "PUT",
+      body: JSON.stringify({ content }),
+    }),
+
+  getWorkflow: (projectId: string) =>
+    req<WorkflowDefinition>(`/api/projects/${projectId}/workflow`),
+  putWorkflow: (projectId: string, wf: WorkflowDefinition) =>
+    req<WorkflowDefinition>(`/api/projects/${projectId}/workflow`, {
+      method: "PUT",
+      body: JSON.stringify(wf),
+    }),
+  resetWorkflow: (projectId: string) =>
+    req<WorkflowDefinition>(`/api/projects/${projectId}/workflow/reset`, {
+      method: "POST",
+    }),
+
+  listWorkflowPresets: () =>
+    req<WorkflowPreset[]>(`/api/workflow-templates`),
+  deleteWorkflowPreset: (key: string) =>
+    req<void>(`/api/workflow-templates/${key}`, { method: "DELETE" }),
+  saveProjectAsTemplate: (
+    projectId: string,
+    body: { key: string; name: string; description?: string },
+  ) =>
+    req<WorkflowPreset>(`/api/projects/${projectId}/save-as-template`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  applyWorkflowPreset: (projectId: string, key: string) =>
+    req<ApplyTemplateResult>(
+      `/api/projects/${projectId}/apply-template/${key}`,
+      { method: "POST" },
+    ),
+  importWorkflowPreset: (preset: WorkflowPreset) =>
+    req<WorkflowPreset>(`/api/admin/templates/import`, {
+      method: "POST",
+      body: JSON.stringify(preset),
+    }),
+
+  adminMetrics: (days = 7) =>
+    req<{
+      window_days: number;
+      run_counts: Record<string, number>;
+      failure_rate_pct: number;
+      total_cost_usd: number;
+      daily_series: Array<{ date: string; succeeded: number; failed: number; cost: number }>;
+      top_failing_phases: Array<{ phase_id: string; fails: number }>;
+      longest_phases: Array<{ phase_id: string; avg_duration_ms: number; samples: number }>;
+    }>(`/api/admin/metrics?days=${days}`),
+
+  adminOverview: () =>
+    req<{
+      projects_count: number;
+      agents_count: number;
+      tickets_by_status: Record<string, number>;
+      runs_by_status: Record<string, number>;
+      runs_total: number;
+      total_cost_usd: number;
+      cost_by_project: Array<{
+        project_id: string;
+        project_name: string;
+        total_cost_usd: number;
+        today_cost_usd: number;
+        daily_cost_cap_usd: number | null;
+        runs: number;
+      }>;
+      cost_last_7_days: Array<{ date: string; cost: number; runs: number }>;
+    }>(`/api/admin/overview`),
+  mkdirFolder: (parent: string, name: string) =>
+    req<{ path: string }>(`/api/admin/mkdir`, {
+      method: "POST",
+      body: JSON.stringify({ parent, name }),
+    }),
+
+  browseFolder: (path?: string) =>
+    req<{
+      path: string;
+      parent: string | null;
+      is_git: boolean;
+      entries: Array<{ name: string; is_dir: boolean; is_git: boolean; is_hidden: boolean }>;
+    }>(`/api/admin/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`),
+
+  adminRecentRuns: (limit = 50) =>
+    req<Array<{
+      run_id: string;
+      status: string;
+      agent_role: string;
+      current_agent_name: string | null;
+      total_cost_usd: number | null;
+      started_at: string | null;
+      finished_at: string | null;
+      created_at: string;
+      project_id: string;
+      project_name: string;
+      ticket_id: string;
+      ticket_key: string | null;
+      ticket_title: string;
+    }>>(`/api/admin/recent-runs?limit=${limit}`),
+
+  getMemory: (projectId: string) =>
+    req<{ content: string }>(`/api/projects/${projectId}/memory`),
+  putMemory: (projectId: string, content: string) =>
+    req<{ content: string }>(`/api/projects/${projectId}/memory`, {
+      method: "PUT",
+      body: JSON.stringify({ content }),
+    }),
+
+  bulkImport: (projectId: string, input: BulkImportInput) =>
+    req<BulkImportResult>(`/api/projects/${projectId}/tickets/bulk`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+
+  getScheduler: () => req<SchedulerStatus>(`/api/scheduler`),
+  setSchedulerMode: (mode: SchedulerMode) =>
+    req<SchedulerStatus>(`/api/scheduler/mode`, {
+      method: "POST",
+      body: JSON.stringify({ mode }),
+    }),
+  setSchedulerCapacity: (value: number) =>
+    req<SchedulerStatus>(`/api/scheduler/max-concurrent`, {
+      method: "POST",
+      body: JSON.stringify({ value }),
+    }),
+
+  openPr: (runId: string) =>
+    req<{
+      repo_name: string;
+      pushed: boolean;
+      push_output: string;
+      pr_url: string | null;
+      pr_method: "gh" | "compare-link" | "skipped";
+      error?: string;
+    }[]>(`/api/runs/${runId}/pr`, { method: "POST" }),
+};
+
+/** Open an SSE connection to a run's event stream. */
+export function streamRunEvents(
+  runId: string,
+  onEvent: (ev: any) => void,
+  since = 0,
+): () => void {
+  const es = new EventSource(`/api/runs/${runId}/stream?since=${since}`);
+  es.onmessage = (e) => {
+    try {
+      onEvent(JSON.parse(e.data));
+    } catch (err) {
+      console.error("bad SSE payload", err);
+    }
+  };
+  es.onerror = () => {
+    // Browser auto-reconnects; let it.
+  };
+  return () => es.close();
+}

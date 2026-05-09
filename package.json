@@ -1,0 +1,13 @@
+{
+  "name": "ceo",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev": "npm run dev --workspaces --if-present",
+    "dev:server": "npm run dev -w @ceo/server",
+    "dev:web": "npm run dev -w @ceo/web",
+    "build": "npm run build --workspaces --if-present"
+  },
+  "engines": { "node": ">=20" }
+}
