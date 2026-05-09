@@ -161,7 +161,7 @@ export async function runDirectorPhase(args: DirectorRunArgs): Promise<DirectorR
     const action = decision.action;
 
     // Code-level guardrails (defense in depth — prompt rules can be ignored).
-    const guard = enforceGuardrails(action, history);
+    const guard = enforceGuardrails(action, history, args.project);
     if (guard) {
       args.emit("system", { msg: `Director guardrail: ${guard.reason}` });
       // Append a synthetic outcome so Director sees the rejection on the next turn.
@@ -270,28 +270,38 @@ export async function runDirectorPhase(args: DirectorRunArgs): Promise<DirectorR
 // ---- Guardrails -------------------------------------------------------------
 
 /** Code-level rules that override Director's prompt instructions. Returns null
- *  if the action is allowed, or a rejection with a reason for the next turn. */
-function enforceGuardrails(action: DirectorAction, history: TurnRecord[]): { reason: string } | null {
-  // 1) Hard cap: same sub-agent dispatched too many times.
+ *  if the action is allowed, or a rejection with a reason for the next turn.
+ *
+ *  The cap counts dispatches per *physical sub-agent name*, regardless of
+ *  whether they were invoked via `dispatch` (free-form) or `run_playbook_phase`
+ *  (canonical) or `use_playbook` (recipe). All three end up calling
+ *  dispatchSubagent which records the real agent name in history, so we
+ *  resolve the action target to a name and compare against history. */
+function enforceGuardrails(
+  action: DirectorAction,
+  history: TurnRecord[],
+  project: ProjectWithRepos,
+): { reason: string } | null {
+  // Resolve the agent name this action would invoke (or null for non-dispatch).
+  let targetName: string | null = null;
   if (action.action === "dispatch") {
-    const count = history.filter(
-      (t) => t.outcome.kind === "subagent" && t.outcome.subagent === action.subagent,
-    ).length;
-    if (count >= MAX_DISPATCHES_PER_SUBAGENT) {
-      return {
-        reason: `Sub-agent "${action.subagent}" already dispatched ${count}× (cap ${MAX_DISPATCHES_PER_SUBAGENT}). Pick a different sub-agent, escalate, request_decompose, or give_up.`,
-      };
+    targetName = action.subagent;
+  } else if (action.action === "run_playbook_phase") {
+    const phase = project.workflow.phases.find((p) => p.id === action.phase_id);
+    if (phase?.kind === "agent" && phase.agent_id) {
+      targetName = project.agents.find((a) => a.id === phase.agent_id)?.name ?? null;
     }
   }
-  if (action.action === "run_playbook_phase") {
-    // Playbook phases are also dispatches under the hood — enforce the same cap
-    // when they target an agent we can identify by phase id (best-effort).
+  // 1) Hard cap: same sub-agent dispatched too many times. Counts the
+  //    physical name so a playbook-phase invocation and a direct dispatch
+  //    of the same agent share the budget.
+  if (targetName) {
     const count = history.filter(
-      (t) => t.outcome.kind === "subagent" && t.outcome.subagent === `playbook:${action.phase_id}`,
+      (t) => t.outcome.kind === "subagent" && t.outcome.subagent === targetName,
     ).length;
     if (count >= MAX_DISPATCHES_PER_SUBAGENT) {
       return {
-        reason: `Playbook phase "${action.phase_id}" already invoked ${count}× (cap ${MAX_DISPATCHES_PER_SUBAGENT}). Try a different phase or escalate.`,
+        reason: `Sub-agent "${targetName}" already dispatched ${count}× (cap ${MAX_DISPATCHES_PER_SUBAGENT}). Pick a different sub-agent, escalate, request_decompose, or give_up.`,
       };
     }
   }

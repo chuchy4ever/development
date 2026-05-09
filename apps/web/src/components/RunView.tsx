@@ -84,19 +84,19 @@ export function RunView({ runId, onClose }: Props) {
     logEnd.current?.scrollIntoView({ behavior: "smooth" });
   }, [events.length]);
 
-  const diffs = events.filter((e) => e.type === "diff");
+  const diffs = useMemo(() => events.filter((e) => e.type === "diff"), [events]);
   const [actionBusy, setActionBusy] = useState(false);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
 
   async function handleCancel() {
-    if (!confirm("Cancel this run? The Coder process will be terminated.")) return;
+    if (!confirm(t("run.confirm_cancel"))) return;
     setActionBusy(true);
     setActionMsg(null);
     try {
       const r = await api.cancelRun(runId);
       setRun(r);
     } catch (e: any) {
-      setActionMsg(`Cancel failed: ${e.message}`);
+      setActionMsg(`${t("run.cancel_failed")}: ${e.message}`);
     } finally {
       setActionBusy(false);
     }
@@ -114,7 +114,7 @@ export function RunView({ runId, onClose }: Props) {
       );
       setActionMsg(lines.join("\n"));
     } catch (e: any) {
-      setActionMsg(`Open PR failed: ${e.message}`);
+      setActionMsg(`${t("run.openpr_failed")}: ${e.message}`);
     } finally {
       setActionBusy(false);
     }
@@ -125,10 +125,13 @@ export function RunView({ runId, onClose }: Props) {
   const canPr = run?.status === "succeeded";
 
   // Most recent awaiting_approval event (so we can show the message even after
-  // events list grows long).
-  const lastApprovalEvent = [...events]
-    .reverse()
-    .find((e) => e.type === "awaiting_approval");
+  // events list grows long). Iterate from the end without cloning.
+  const lastApprovalEvent = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i]!.type === "awaiting_approval") return events[i];
+    }
+    return undefined;
+  }, [events]);
   const approvalMessage = (lastApprovalEvent?.payload as any)?.message as string | null | undefined;
   const approvalPhaseId = (lastApprovalEvent?.payload as any)?.phase_id as string | undefined;
   const [approvalNote, setApprovalNote] = useState("");
@@ -141,14 +144,14 @@ export function RunView({ runId, onClose }: Props) {
       setRun(r);
       setApprovalNote("");
     } catch (e: any) {
-      setActionMsg(`Approve failed: ${e.message}`);
+      setActionMsg(`${t("run.approve_failed")}: ${e.message}`);
     } finally {
       setActionBusy(false);
     }
   }
 
   async function handleReject() {
-    if (!confirm("Reject this approval? The run will retry the upstream phase if a retry target is set, otherwise fail.")) return;
+    if (!confirm(t("run.confirm_reject"))) return;
     setActionBusy(true);
     setActionMsg(null);
     try {
@@ -156,7 +159,7 @@ export function RunView({ runId, onClose }: Props) {
       setRun(r);
       setApprovalNote("");
     } catch (e: any) {
-      setActionMsg(`Reject failed: ${e.message}`);
+      setActionMsg(`${t("run.reject_failed")}: ${e.message}`);
     } finally {
       setActionBusy(false);
     }
@@ -260,7 +263,7 @@ export function RunView({ runId, onClose }: Props) {
             <input
               value={approvalNote}
               onChange={(e) => setApprovalNote(e.target.value)}
-              placeholder="optional note (audit trail)"
+              placeholder={t("run.approval_note_placeholder")}
               style={{ width: "100%", marginBottom: 8, fontSize: 12 }}
             />
             <div style={{ display: "flex", gap: 8 }}>
@@ -302,7 +305,7 @@ export function RunView({ runId, onClose }: Props) {
                 a.click();
                 URL.revokeObjectURL(url);
               }}
-              title="Download all events as JSON for debug"
+              title={t("run.export_log_title")}
               style={{ marginRight: 8, alignSelf: "center", fontSize: 11 }}
             >
               ⬇ {t("btn.export_log")}
@@ -398,49 +401,53 @@ function LogView({ events }: { events: UiEvent[] }) {
  * ok/fail counts, commits added. Shows bounces (>1 dispatch) prominently —
  * those are usually the interesting "where did we get stuck" signal.
  */
+type AgentStat = {
+  name: string;
+  role: string;
+  model: string | null;
+  dispatches: number;
+  cost_usd: number;
+  duration_ms: number;
+  ok: number;
+  fail: number;
+  null_count: number;
+  commits: number;
+};
+
 function AgentBreakdown({ events }: { events: UiEvent[] }) {
-  type Stat = {
-    name: string;
-    role: string;
-    model: string | null;
-    dispatches: number;
-    cost_usd: number;
-    duration_ms: number;
-    ok: number;
-    fail: number;
-    null_count: number;
-    commits: number;
-    pending: { startedAt: number } | null;
-  };
-  const byAgent = new Map<string, Stat>();
-  for (const e of events) {
-    const p = e.payload || {};
-    const ts = new Date(e.ts).getTime();
-    if (e.type === "director_dispatch") {
-      const name = String(p.subagent ?? "?");
-      let s = byAgent.get(name);
-      if (!s) {
-        s = { name, role: p.role ?? "", model: p.model ?? null, dispatches: 0, cost_usd: 0, duration_ms: 0, ok: 0, fail: 0, null_count: 0, commits: 0, pending: null };
-        byAgent.set(name, s);
+  const { stats, totalCost } = useMemo(() => {
+    type S = AgentStat & { pending: { startedAt: number } | null };
+    const byAgent = new Map<string, S>();
+    for (const e of events) {
+      const p = e.payload || {};
+      const ts = new Date(e.ts).getTime();
+      if (e.type === "director_dispatch") {
+        const name = String(p.subagent ?? "?");
+        let s = byAgent.get(name);
+        if (!s) {
+          s = { name, role: p.role ?? "", model: p.model ?? null, dispatches: 0, cost_usd: 0, duration_ms: 0, ok: 0, fail: 0, null_count: 0, commits: 0, pending: null };
+          byAgent.set(name, s);
+        }
+        s.dispatches++;
+        s.pending = { startedAt: ts };
+      } else if (e.type === "director_subagent_done") {
+        const name = String(p.subagent ?? "?");
+        const s = byAgent.get(name);
+        if (!s) continue;
+        if (p.ok === true) s.ok++;
+        else if (p.ok === false) s.fail++;
+        else s.null_count++;
+        if (typeof p.cost_usd === "number") s.cost_usd += p.cost_usd;
+        if (typeof p.commits_added === "number") s.commits += p.commits_added;
+        if (s.pending) s.duration_ms += ts - s.pending.startedAt;
+        s.pending = null;
       }
-      s.dispatches++;
-      s.pending = { startedAt: ts };
-    } else if (e.type === "director_subagent_done") {
-      const name = String(p.subagent ?? "?");
-      const s = byAgent.get(name);
-      if (!s) continue;
-      if (p.ok === true) s.ok++;
-      else if (p.ok === false) s.fail++;
-      else s.null_count++;
-      if (typeof p.cost_usd === "number") s.cost_usd += p.cost_usd;
-      if (typeof p.commits_added === "number") s.commits += p.commits_added;
-      if (s.pending) s.duration_ms += ts - s.pending.startedAt;
-      s.pending = null;
     }
-  }
-  const stats = Array.from(byAgent.values()).sort((a, b) => b.cost_usd - a.cost_usd);
+    const stats = Array.from(byAgent.values()).sort((a, b) => b.cost_usd - a.cost_usd);
+    const totalCost = stats.reduce((sum, s) => sum + s.cost_usd, 0);
+    return { stats, totalCost };
+  }, [events]);
   if (stats.length === 0) return null;
-  const totalCost = stats.reduce((sum, s) => sum + s.cost_usd, 0);
 
   return (
     <div style={{
@@ -449,7 +456,7 @@ function AgentBreakdown({ events }: { events: UiEvent[] }) {
       background: "var(--bg-elev)",
     }}>
       <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>
-        AGENT BREAKDOWN · {stats.length} agent{stats.length === 1 ? "" : "s"} · ${totalCost.toFixed(2)} total
+        {t("run.agent_breakdown", { count: stats.length, total: totalCost.toFixed(2) })}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         {stats.map((s) => {
@@ -525,60 +532,63 @@ function fmtDuration(ms: number): string {
  * as a horizontal sequence of chips, color-coded by sub-agent role. Compact
  * summary so the user can see "where we are" without scrolling the log.
  */
+type FlowStep = {
+  iter: number;
+  action: string;
+  label: string;
+  role: string;
+  cost: number;
+  duration_ms: number;
+  startedAt: number | null;
+  ok: boolean | null | undefined;
+  inProgress: boolean;
+};
+
 function TeamFlowHeader({ events }: { events: UiEvent[] }) {
-  // Build a sequence of director_decision + dispatch + done events.
-  type Step = {
-    iter: number;
-    action: string;
-    label: string;
-    role: string;
-    cost: number;
-    duration_ms: number;
-    startedAt: number | null;
-    ok: boolean | null | undefined;
-    inProgress: boolean;
-  };
-  const steps: Step[] = [];
-  let lastIter = 0;
-  for (const e of events) {
-    const p = e.payload || {};
-    const ts = new Date(e.ts).getTime();
-    if (e.type === "director_decision") {
-      lastIter = p.iteration ?? lastIter + 1;
-      const a = p.action ?? {};
-      const action = a.action ?? "?";
-      let label = action;
-      if (action === "dispatch") label = a.subagent ?? "agent";
-      else if (action === "run_playbook_phase") label = a.phase_id ?? "phase";
-      else if (action === "use_playbook") label = `📖 ${a.playbook ?? "playbook"}`;
-      else if (action === "run_ci_gate") label = "ci_gate";
-      else if (action === "mark_done") label = "✓ done";
-      else if (action === "give_up") label = "✗ give_up";
-      else if (action === "request_decompose") label = "↯ decompose";
-      steps.push({ iter: lastIter, action, label, role: "?", cost: p.cost_usd ?? 0, duration_ms: 0, startedAt: ts, ok: undefined, inProgress: true });
-    } else if (e.type === "director_dispatch") {
-      const last = steps[steps.length - 1];
-      if (last) {
-        last.role = p.role ?? last.role;
-        if (p.subagent === "ci_gate") last.role = "gate";
-        last.startedAt = ts;
+  const steps = useMemo(() => {
+    const list: FlowStep[] = [];
+    let lastIter = 0;
+    for (const e of events) {
+      const p = e.payload || {};
+      const ts = new Date(e.ts).getTime();
+      if (e.type === "director_decision") {
+        lastIter = p.iteration ?? lastIter + 1;
+        const a = p.action ?? {};
+        const action = a.action ?? "?";
+        let label = action;
+        if (action === "dispatch") label = a.subagent ?? "agent";
+        else if (action === "run_playbook_phase") label = a.phase_id ?? "phase";
+        else if (action === "use_playbook") label = `📖 ${a.playbook ?? "playbook"}`;
+        else if (action === "run_ci_gate") label = "ci_gate";
+        else if (action === "mark_done") label = "✓ done";
+        else if (action === "give_up") label = "✗ give_up";
+        else if (action === "request_decompose") label = "↯ decompose";
+        list.push({ iter: lastIter, action, label, role: "?", cost: p.cost_usd ?? 0, duration_ms: 0, startedAt: ts, ok: undefined, inProgress: true });
+      } else if (e.type === "director_dispatch") {
+        const last = list[list.length - 1];
+        if (last) {
+          last.role = p.role ?? last.role;
+          if (p.subagent === "ci_gate") last.role = "gate";
+          last.startedAt = ts;
+        }
+      } else if (e.type === "director_subagent_done") {
+        const last = list[list.length - 1];
+        if (last) {
+          last.ok = p.ok;
+          last.cost = (last.cost ?? 0) + (p.cost_usd ?? 0);
+          last.inProgress = false;
+          if (last.startedAt) last.duration_ms = ts - last.startedAt;
+        }
+      } else if (e.type === "director_end") {
+        const last = list[list.length - 1];
+        if (last) last.inProgress = false;
       }
-    } else if (e.type === "director_subagent_done") {
-      const last = steps[steps.length - 1];
-      if (last) {
-        last.ok = p.ok;
-        last.cost = (last.cost ?? 0) + (p.cost_usd ?? 0);
-        last.inProgress = false;
-        if (last.startedAt) last.duration_ms = ts - last.startedAt;
-      }
-    } else if (e.type === "director_end") {
-      const last = steps[steps.length - 1];
-      if (last) last.inProgress = false;
     }
-  }
+    return list;
+  }, [events]);
   if (steps.length === 0) return null;
 
-  const colorFor = (s: Step): string => {
+  const colorFor = (s: FlowStep): string => {
     if (s.action === "mark_done") return "#16a34a";
     if (s.action === "give_up") return "#dc2626";
     if (s.action === "use_playbook") return "#7c3aed";

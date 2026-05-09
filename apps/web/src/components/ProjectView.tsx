@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import type { ActiveRunSummary, ProjectWithRepos, Ticket } from "@ceo/shared";
 import { SKILL_CATEGORY_LABEL, SKILL_CATEGORY_ORDER } from "@ceo/shared";
 import { api } from "../api";
@@ -10,8 +10,9 @@ import { InboxForm } from "./InboxForm";
 import { TicketModal } from "./TicketModal";
 import { SchedulerBar } from "./SchedulerBar";
 import { BulkImportModal } from "./BulkImportModal";
-import { WorkflowEditor } from "./WorkflowEditor";
-import { AgentsView } from "./AgentsView";
+// WorkflowEditor pulls in ReactFlow (~150 KB gz). Lazy-load it so users who
+// only ever look at the Board tab don't pay for it.
+const WorkflowEditor = lazy(() => import("./WorkflowEditor").then((m) => ({ default: m.WorkflowEditor })));
 import { MemoryView } from "./MemoryView";
 
 interface Props {
@@ -66,18 +67,26 @@ export function ProjectView({ project, route, navigate, onChanged, onDeleted }: 
   }, [project.id, tab]);
 
   // Poll active runs while on the Board tab so cards show who's working.
+  // Fast cadence (2.5s) when something is running; back off to 15s when
+  // nothing's active — most projects sit idle most of the time.
   useEffect(() => {
     if (tab !== "board") return;
     let cancelled = false;
+    let timer: number | null = null;
     async function tick() {
       try {
         const list = await api.listActiveRuns(project.id);
-        if (!cancelled) setActiveRuns(list);
-      } catch {}
+        if (cancelled) return;
+        setActiveRuns(list);
+        if (cancelled) return;
+        const delay = list.length > 0 ? 2500 : 15000;
+        timer = window.setTimeout(tick, delay);
+      } catch {
+        if (!cancelled) timer = window.setTimeout(tick, 15000);
+      }
     }
     tick();
-    const t = setInterval(tick, 2500);
-    return () => { cancelled = true; clearInterval(t); };
+    return () => { cancelled = true; if (timer !== null) clearTimeout(timer); };
   }, [project.id, tab]);
 
   return (
@@ -134,7 +143,11 @@ export function ProjectView({ project, route, navigate, onChanged, onDeleted }: 
           </>
         )}
         {/* "agents" route still parses for back-compat with old bookmarks; show the unified Playbook editor instead. */}
-        {(tab === "workflow" || tab === "agents") && <WorkflowEditor project={project} tickets={tickets} onChanged={onChanged} />}
+        {(tab === "workflow" || tab === "agents") && (
+          <Suspense fallback={<div style={{ color: "var(--text-dim)", padding: 20 }}>{t("common.loading")}</div>}>
+            <WorkflowEditor project={project} tickets={tickets} onChanged={onChanged} />
+          </Suspense>
+        )}
         {tab === "memory" && <MemoryView project={project} />}
         {tab === "settings" && (
           <ProjectSettings
@@ -184,34 +197,39 @@ function TeamBoards({
   onCardClick: (t: Ticket) => void;
 }) {
   const teams = project.workflow.teams ?? [];
+  // Memoize all derived collections — Board polls these inputs every 2.5s,
+  // and rebuilding the maps on every poll is wasted work when nothing changed.
+  const sortedTeams = useMemo(
+    () => [...teams].sort((a, b) => {
+      const ai = SKILL_CATEGORY_ORDER.indexOf(a.category ?? "general");
+      const bi = SKILL_CATEGORY_ORDER.indexOf(b.category ?? "general");
+      return ai - bi;
+    }),
+    [teams],
+  );
+  const ticketById = useMemo(() => new Map(tickets.map((t) => [t.id, t])), [tickets]);
+  const runsByTeam = useMemo(() => {
+    const teamByAgentName = new Map<string, typeof teams>();
+    for (const tm of teams) {
+      for (const n of tm.agent_names) {
+        const list = teamByAgentName.get(n) ?? [];
+        list.push(tm);
+        teamByAgentName.set(n, list);
+      }
+    }
+    const out = new Map<string, ActiveRunSummary[]>();
+    for (const r of activeRuns) {
+      const name = r.current_agent_name ?? "";
+      const matched = teamByAgentName.get(name) ?? [];
+      for (const tm of matched) {
+        const list = out.get(tm.id) ?? [];
+        list.push(r);
+        out.set(tm.id, list);
+      }
+    }
+    return out;
+  }, [teams, activeRuns]);
   if (teams.length === 0) return null;
-  // Map agent name → team(s).
-  const teamByAgentName = new Map<string, typeof teams>();
-  for (const t of teams) {
-    for (const n of t.agent_names) {
-      const list = teamByAgentName.get(n) ?? [];
-      list.push(t);
-      teamByAgentName.set(n, list);
-    }
-  }
-  // Group active runs by team.
-  const runsByTeam = new Map<string, ActiveRunSummary[]>();
-  for (const r of activeRuns) {
-    const name = r.current_agent_name ?? "";
-    const matched = teamByAgentName.get(name) ?? [];
-    for (const tm of matched) {
-      const list = runsByTeam.get(tm.id) ?? [];
-      list.push(r);
-      runsByTeam.set(tm.id, list);
-    }
-  }
-  const ticketById = new Map(tickets.map((t) => [t.id, t]));
-  // Order teams by SkillCategory canonical order.
-  const sortedTeams = [...teams].sort((a, b) => {
-    const ai = SKILL_CATEGORY_ORDER.indexOf(a.category ?? "general");
-    const bi = SKILL_CATEGORY_ORDER.indexOf(b.category ?? "general");
-    return ai - bi;
-  });
 
   return (
     <div style={{ display: "flex", gap: 10, overflowX: "auto", padding: "8px 0 12px", marginBottom: 6 }}>
@@ -314,22 +332,25 @@ function ProjectStats({ project }: { project: ProjectWithRepos }) {
     return () => { cancelled = true; clearInterval(i); };
   }, [project.id]);
 
-  if (!stats) return null;
-
-  const succeeded = stats.runs_by_status.succeeded ?? 0;
-  const failed = stats.runs_by_status.failed ?? 0;
-  const cancelled = stats.runs_by_status.cancelled ?? 0;
-  const running = stats.runs_by_status.running ?? 0;
-  const successRate = stats.runs_total > 0
-    ? Math.round((succeeded / stats.runs_total) * 100)
-    : 0;
-  const cap = project.daily_cost_cap_usd;
-  const capPct = cap && cap > 0 ? Math.min(100, Math.round((stats.today_cost_usd / cap) * 100)) : null;
-
-  const runtimeHours = stats.total_runtime_ms / 3_600_000;
-  const fmtRuntime = runtimeHours >= 1
-    ? `${runtimeHours.toFixed(1)}h`
-    : `${Math.round(stats.total_runtime_ms / 60000)}m`;
+  const derived = useMemo(() => {
+    if (!stats) return null;
+    const succeeded = stats.runs_by_status.succeeded ?? 0;
+    const failed = stats.runs_by_status.failed ?? 0;
+    const cancelled = stats.runs_by_status.cancelled ?? 0;
+    const running = stats.runs_by_status.running ?? 0;
+    const successRate = stats.runs_total > 0
+      ? Math.round((succeeded / stats.runs_total) * 100)
+      : 0;
+    const cap = project.daily_cost_cap_usd;
+    const capPct = cap && cap > 0 ? Math.min(100, Math.round((stats.today_cost_usd / cap) * 100)) : null;
+    const runtimeHours = stats.total_runtime_ms / 3_600_000;
+    const fmtRuntime = runtimeHours >= 1
+      ? `${runtimeHours.toFixed(1)}h`
+      : `${Math.round(stats.total_runtime_ms / 60000)}m`;
+    return { succeeded, failed, cancelled, running, successRate, cap, capPct, fmtRuntime };
+  }, [stats, project.daily_cost_cap_usd]);
+  if (!stats || !derived) return null;
+  const { succeeded, failed, cancelled, running, successRate, cap, capPct, fmtRuntime } = derived;
 
   return (
     <div style={{
@@ -339,47 +360,47 @@ function ProjectStats({ project }: { project: ProjectWithRepos }) {
     }}>
       <StatTile
         icon="💰"
-        label="Total spent"
+        label={t("stats.total_spent")}
         value={`$${stats.total_cost_usd.toFixed(2)}`}
-        sub={`today $${stats.today_cost_usd.toFixed(2)}${cap ? ` / cap $${cap}` : ""}`}
+        sub={`${t("stats.today")} $${stats.today_cost_usd.toFixed(2)}${cap ? ` / ${t("stats.cap")} $${cap}` : ""}`}
         accent="#7c3aed"
         progress={capPct}
       />
       <StatTile
         icon="📊"
-        label="Avg per run"
+        label={t("stats.avg_per_run")}
         value={`$${stats.avg_cost_per_run_usd.toFixed(2)}`}
-        sub={`${stats.runs_total} runs · last 7d $${stats.last_7_days_cost_usd.toFixed(2)}`}
+        sub={`${t("stats.runs", { count: stats.runs_total })} · ${t("stats.last_7d")} $${stats.last_7_days_cost_usd.toFixed(2)}`}
         accent="#0ea5e9"
       />
       <StatTile
         icon="🎫"
-        label="Tickets"
+        label={t("stats.tickets")}
         value={`${stats.tickets_total}`}
         sub={Object.entries(stats.tickets_by_status)
-          .map(([s, n]) => `${n} ${s}`)
+          .map(([s, n]) => `${n} ${t(`board.col.${s}`)}`)
           .join(" · ")}
         accent="#10b981"
       />
       <StatTile
         icon="✓"
-        label="Success rate"
+        label={t("stats.success_rate")}
         value={`${successRate}%`}
-        sub={`${succeeded}✓ ${failed}✗ ${cancelled}⊘${running ? ` · ${running} running` : ""}`}
+        sub={`${succeeded}✓ ${failed}✗ ${cancelled}⊘${running ? ` · ${t("stats.running", { count: running })}` : ""}`}
         accent={successRate >= 80 ? "#10b981" : successRate >= 50 ? "#d29922" : "#dc2626"}
       />
       <StatTile
         icon="⏱"
-        label="Total runtime"
+        label={t("stats.runtime")}
         value={fmtRuntime}
-        sub={`across ${stats.runs_total} run${stats.runs_total === 1 ? "" : "s"}`}
+        sub={t(stats.runs_total === 1 ? "stats.runtime_sub" : "stats.runtime_sub_plural", { count: stats.runs_total })}
         accent="#6b7280"
       />
       <StatTile
         icon="🚀"
-        label="Est. dev time saved"
+        label={t("stats.saved")}
         value={`~${stats.estimated_saved_hours}h`}
-        sub="1.5h × successful runs (rough)"
+        sub={t("stats.saved_sub")}
         accent="#ec4899"
       />
     </div>

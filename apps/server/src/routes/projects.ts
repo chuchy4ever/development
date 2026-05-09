@@ -316,70 +316,61 @@ projectsRouter.get("/:id/stats", (req, res) => {
     return res.status(404).json({ error: "not found" });
   }
   const projectId = req.params.id;
-  // Aggregate from runs + tickets. All counts are lifetime; the UI can
-  // narrow by date client-side using individual rows if needed later.
-  const runRows = db.prepare(
-    `SELECT id, status, total_cost_usd, started_at, finished_at, created_at
-       FROM runs WHERE project_id = ?`,
-  ).all(projectId) as {
-    id: string;
-    status: string;
-    total_cost_usd: number | null;
-    started_at: string | null;
-    finished_at: string | null;
-    created_at: string;
-  }[];
+  // Aggregate everything in SQL — for projects with thousands of runs,
+  // streaming all rows and reducing in JS doesn't scale.
+  const todayIso = new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
+  const sevenDaysIso = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
+  const nowIsoStr = new Date().toISOString();
 
-  const ticketRows = db.prepare(
-    `SELECT status, COUNT(*) as cnt FROM tickets WHERE project_id = ? GROUP BY status`,
+  const agg = db.prepare(`
+    SELECT
+      COUNT(*) AS runs_total,
+      COALESCE(SUM(total_cost_usd), 0) AS total_cost_usd,
+      COALESCE(SUM(CASE WHEN created_at >= ? THEN total_cost_usd ELSE 0 END), 0) AS today_cost_usd,
+      COALESCE(SUM(CASE WHEN created_at >= ? THEN total_cost_usd ELSE 0 END), 0) AS last_7_days_cost_usd,
+      COALESCE(
+        SUM(
+          CASE WHEN started_at IS NOT NULL THEN
+            (julianday(COALESCE(finished_at, ?)) - julianday(started_at)) * 86400000
+          ELSE 0 END
+        ), 0
+      ) AS total_runtime_ms
+    FROM runs
+    WHERE project_id = ?
+  `).get(todayIso, sevenDaysIso, nowIsoStr, projectId) as {
+    runs_total: number;
+    total_cost_usd: number;
+    today_cost_usd: number;
+    last_7_days_cost_usd: number;
+    total_runtime_ms: number;
+  };
+
+  const runsByStatusRows = db.prepare(
+    `SELECT status, COUNT(*) AS cnt FROM runs WHERE project_id = ? GROUP BY status`,
   ).all(projectId) as { status: string; cnt: number }[];
+  const runs_by_status: Record<string, number> = {};
+  for (const r of runsByStatusRows) runs_by_status[r.status] = r.cnt;
 
-  let total_cost_usd = 0;
-  let total_runtime_ms = 0;
-  const byStatus: Record<string, number> = {};
-  let last7DaysCost = 0;
-  const sevenDaysAgo = Date.now() - 7 * 24 * 3600 * 1000;
-  for (const r of runRows) {
-    const c = r.total_cost_usd ?? 0;
-    total_cost_usd += c;
-    if (r.started_at) {
-      const t0 = new Date(r.started_at).getTime();
-      const t1 = r.finished_at ? new Date(r.finished_at).getTime() : Date.now();
-      if (Number.isFinite(t0) && Number.isFinite(t1) && t1 >= t0) {
-        total_runtime_ms += t1 - t0;
-      }
-    }
-    if (new Date(r.created_at).getTime() >= sevenDaysAgo) {
-      last7DaysCost += c;
-    }
-    byStatus[r.status] = (byStatus[r.status] ?? 0) + 1;
-  }
-  const ticketsByStatus: Record<string, number> = {};
-  for (const t of ticketRows) ticketsByStatus[t.status] = t.cnt;
+  const ticketsByStatusRows = db.prepare(
+    `SELECT status, COUNT(*) AS cnt FROM tickets WHERE project_id = ? GROUP BY status`,
+  ).all(projectId) as { status: string; cnt: number }[];
+  const tickets_by_status: Record<string, number> = {};
+  for (const t of ticketsByStatusRows) tickets_by_status[t.status] = t.cnt;
+  const tickets_total = ticketsByStatusRows.reduce((s, r) => s + r.cnt, 0);
 
-  // Today's cost — used for the daily cap warning UI elsewhere.
-  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-  const todayCost = runRows
-    .filter((r) => new Date(r.created_at).getTime() >= todayStart.getTime())
-    .reduce((s, r) => s + (r.total_cost_usd ?? 0), 0);
-
-  // Soft estimate of human dev time saved: 1.5h per succeeded run is a
-  // defensible ballpark for the kinds of small/medium tickets ceo handles.
-  // We expose this as a guesstimate; the UI labels it as such.
-  const succeeded = byStatus.succeeded ?? 0;
-  const estimated_saved_hours = +(succeeded * 1.5).toFixed(1);
+  const succeeded = runs_by_status.succeeded ?? 0;
 
   res.json({
-    runs_total: runRows.length,
-    runs_by_status: byStatus,
-    total_cost_usd: +total_cost_usd.toFixed(4),
-    today_cost_usd: +todayCost.toFixed(4),
-    last_7_days_cost_usd: +last7DaysCost.toFixed(4),
-    total_runtime_ms,
-    avg_cost_per_run_usd: runRows.length > 0 ? +(total_cost_usd / runRows.length).toFixed(4) : 0,
-    tickets_by_status: ticketsByStatus,
-    tickets_total: Object.values(ticketsByStatus).reduce((a, b) => a + b, 0),
-    estimated_saved_hours,
+    runs_total: agg.runs_total,
+    runs_by_status,
+    total_cost_usd: +agg.total_cost_usd.toFixed(4),
+    today_cost_usd: +agg.today_cost_usd.toFixed(4),
+    last_7_days_cost_usd: +agg.last_7_days_cost_usd.toFixed(4),
+    total_runtime_ms: Math.round(agg.total_runtime_ms),
+    avg_cost_per_run_usd: agg.runs_total > 0 ? +(agg.total_cost_usd / agg.runs_total).toFixed(4) : 0,
+    tickets_by_status,
+    tickets_total,
+    estimated_saved_hours: +(succeeded * 1.5).toFixed(1),
   });
 });
 

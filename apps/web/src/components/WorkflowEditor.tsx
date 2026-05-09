@@ -22,8 +22,10 @@ import type {
   ActiveRunSummary,
   Agent,
   AgentRole,
+  Playbook,
   ProjectWithRepos,
   SkillCategory,
+  Team,
   Ticket,
   WorkflowDefinition,
   WorkflowPhase,
@@ -1076,7 +1078,9 @@ function TeamsPanel({
   agents: Agent[];
   onChange: (updater: (next: WorkflowDefinition) => void) => void;
 }) {
-  const [open, setOpen] = useState(true);
+  // Closed by default so the playbook tab doesn't open as a wall of panels.
+  // The Skills panel above is the one that's open on first visit.
+  const [open, setOpen] = useState(false);
   // null = closed; "new" = create mode; <id> = edit existing.
   const [editing, setEditing] = useState<null | "new" | string>(null);
   const teams = wf.teams ?? [];
@@ -1100,7 +1104,6 @@ function TeamsPanel({
       <TeamsFlowDiagram
         teams={teams}
         playbooks={wf.playbooks ?? []}
-        agents={agents}
         onCardClick={(id) => setEditing(id)}
         onAddClick={() => setEditing("new")}
       />
@@ -1146,11 +1149,11 @@ function TeamEditModal({
   onDelete,
 }: {
   mode: "create" | "edit";
-  initial: NonNullable<WorkflowDefinition["teams"]>[number] | null;
+  initial: Team | null;
   agents: Agent[];
   existingIds: string[];
   onClose: () => void;
-  onSave: (team: NonNullable<WorkflowDefinition["teams"]>[number]) => void;
+  onSave: (team: Team) => void;
   onDelete?: () => void;
 }) {
   useEscClose(onClose);
@@ -1188,7 +1191,7 @@ function TeamEditModal({
         style={{ width: "min(620px, 95vw)" }}
       >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-          <h3 style={{ margin: 0 }}>{mode === "create" ? "New team" : `Edit team: ${initial?.name}`}</h3>
+          <h3 style={{ margin: 0 }}>{mode === "create" ? t("team.modal.new") : t("team.modal.edit", { name: initial?.name ?? "" })}</h3>
           <button
             onClick={onClose}
             style={{ background: "transparent", border: 0, fontSize: 20, cursor: "pointer", color: "var(--text-dim)" }}
@@ -1196,33 +1199,33 @@ function TeamEditModal({
           >×</button>
         </div>
         <div className="form-row">
-          <label>Name</label>
+          <label>{t("team.modal.name")}</label>
           <input
             value={name}
-            placeholder="Dev Team"
+            placeholder={t("team.modal.name_placeholder")}
             onChange={(e) => setName(e.target.value)}
             autoFocus
           />
         </div>
         <div className="form-row">
-          <label>Category</label>
+          <label>{t("team.modal.category")}</label>
           <select value={category} onChange={(e) => setCategory(e.target.value as SkillCategory | "")}>
-            <option value="">no category</option>
+            <option value="">{t("team.modal.no_category")}</option>
             {SKILL_CATEGORY_ORDER.map((c) => (
               <option key={c} value={c}>{SKILL_CATEGORY_LABEL[c]}</option>
             ))}
           </select>
         </div>
         <div className="form-row">
-          <label>Description</label>
+          <label>{t("team.modal.description")}</label>
           <input
             value={description}
-            placeholder="when to reach for this team"
+            placeholder={t("team.modal.description_placeholder")}
             onChange={(e) => setDescription(e.target.value)}
           />
         </div>
         <div className="form-row">
-          <label>Members ({memberNames.length})</label>
+          <label>{t("team.modal.members", { count: memberNames.length })}</label>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: 8, background: "var(--bg)", borderRadius: 6, border: "1px solid var(--border)" }}>
             {agents.map((a) => {
               const member = memberNames.includes(a.name);
@@ -1254,14 +1257,14 @@ function TeamEditModal({
             {onDelete && (
               <button
                 className="danger"
-                onClick={() => { if (confirm(`Delete team "${initial?.name}"?`)) onDelete(); }}
-              >Delete team</button>
+                onClick={() => { if (confirm(t("confirm.delete_team", { name: initial?.name ?? "" }))) onDelete(); }}
+              >{t("team.modal.delete")}</button>
             )}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={onClose}>{t("common.cancel")}</button>
             <button className="primary" onClick={save} disabled={!canSave}>
-              {mode === "create" ? "Create team" : t("common.save")}
+              {mode === "create" ? t("team.modal.create") : t("common.save")}
             </button>
           </div>
         </div>
@@ -1282,42 +1285,23 @@ function TeamEditModal({
 function TeamsFlowDiagram({
   teams,
   playbooks,
-  agents,
   onCardClick,
   onAddClick,
 }: {
-  teams: WorkflowDefinition["teams"] extends (infer U)[] | undefined ? U[] : never;
-  playbooks: NonNullable<WorkflowDefinition["playbooks"]>;
-  agents: Agent[];
+  teams: Team[];
+  playbooks: Playbook[];
   onCardClick?: (id: string) => void;
   onAddClick?: () => void;
 }) {
-  // Resolve agent name -> first team it belongs to (for arrow inference).
-  const teamByAgentName = new Map<string, string>();
-  for (const team of teams) {
-    for (const n of team.agent_names) {
-      if (!teamByAgentName.has(n)) teamByAgentName.set(n, team.id);
-    }
-  }
-  // Aggregate transitions from playbooks.
-  const transitions = new Map<string, number>(); // "fromId>toId" -> count
-  // We need each playbook step's phase → agent → team, but here we only have
-  // the WorkflowDefinition.phases through the parent scope. To keep this
-  // component self-contained, infer team membership directly from
-  // playbook step.phase_id by matching the team that owns the agent
-  // referenced by that phase. Since we don't have phases here, we skip
-  // arrow inference when names don't resolve cleanly.
-  // (In practice, the parent passes wf so we could pass phases too — keeping
-  //  the simple v1 here.)
-  void transitions;
-  void agents;
-
   // Sort teams in canonical category order.
-  const sorted = [...teams].sort((a, b) => {
-    const ai = SKILL_CATEGORY_ORDER.indexOf(a.category ?? "general");
-    const bi = SKILL_CATEGORY_ORDER.indexOf(b.category ?? "general");
-    return ai - bi;
-  });
+  const sorted = useMemo(
+    () => [...teams].sort((a, b) => {
+      const ai = SKILL_CATEGORY_ORDER.indexOf(a.category ?? "general");
+      const bi = SKILL_CATEGORY_ORDER.indexOf(b.category ?? "general");
+      return ai - bi;
+    }),
+    [teams],
+  );
 
   return (
     <div style={{
@@ -1328,7 +1312,7 @@ function TeamsFlowDiagram({
       overflowX: "auto",
     }}>
       <div style={{ fontSize: 10, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10 }}>
-        TEAM FLOW
+        {t("team.flow.title")}
       </div>
       <div style={{ display: "flex", alignItems: "stretch", gap: 0, minWidth: "fit-content" }}>
         {sorted.map((team, i) => (
@@ -1365,21 +1349,21 @@ function TeamsFlowDiagram({
               }}
             >
               <span style={{ fontSize: 24 }}>+</span>
-              <span style={{ fontSize: 11 }}>add team</span>
+              <span style={{ fontSize: 11 }}>{t("team.flow.add")}</span>
             </button>
           </div>
         )}
       </div>
       {playbooks.length > 0 && (
         <div style={{ marginTop: 12, fontSize: 11, color: "var(--text-dim)" }}>
-          <span style={{ marginRight: 8 }}>📖 Recipes that walk these teams:</span>
+          <span style={{ marginRight: 8 }}>{t("team.flow.recipes")}</span>
           {playbooks.map((pb, i) => (
             <span key={pb.name} style={{
               display: "inline-block", padding: "2px 8px", borderRadius: 10,
               background: "var(--bg-elev)", border: "1px solid var(--border)",
               marginRight: 6, marginBottom: 4,
             }}>
-              {pb.name} <span style={{ opacity: 0.6 }}>· {pb.steps.length} steps</span>
+              {pb.name} <span style={{ opacity: 0.6 }}>· {t("team.flow.steps", { count: pb.steps.length })}</span>
               {i < playbooks.length - 1 ? "" : ""}
             </span>
           ))}
@@ -1393,7 +1377,7 @@ function TeamCard({
   team,
   onClick,
 }: {
-  team: NonNullable<WorkflowDefinition["teams"]>[number];
+  team: Team;
   onClick?: () => void;
 }) {
   const cat = team.category ?? "general";
@@ -1622,6 +1606,9 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
   const [showTemplates, setShowTemplates] = useState(false);
   const [showSaveTemplate, setShowSaveTemplate] = useState(false);
   const [showLegacyGraph, setShowLegacyGraph] = useState(false);
+  const [bannerDismissed, setBannerDismissed] = useState(() => {
+    try { return localStorage.getItem("ceo.banner.director.dismissed") === "1"; } catch { return false; }
+  });
 
   // Track dragging so we don't repeatedly write positions to wf during a drag.
   const draggingNodeId = useRef<string | null>(null);
@@ -1674,9 +1661,16 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
   const updateWf = useCallback((mut: (next: WorkflowDefinition) => void) => {
     setWf((cur) => {
       if (!cur) return cur;
+      // Deep-clone everything mut() might touch. Phases are clonePhase'd because
+      // they have nested task.config / approval / director objects. Teams,
+      // playbooks, and director_config use structuredClone — they're plain
+      // JSON, not class instances.
       const next: WorkflowDefinition = {
+        ...cur,
         phases: cur.phases.map(clonePhase),
-        project_specifics: cur.project_specifics ?? null,
+        teams: cur.teams ? structuredClone(cur.teams) : undefined,
+        playbooks: cur.playbooks ? structuredClone(cur.playbooks) : undefined,
+        director_config: cur.director_config ? structuredClone(cur.director_config) : cur.director_config,
       };
       mut(next);
       return next;
@@ -1896,7 +1890,7 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
   }
 
   async function reset() {
-    if (!confirm("Reset playbook to default (one skill per agent role)?")) return;
+    if (!confirm(t("confirm.reset_playbook"))) return;
     setBusy(true);
     setInfo(null);
     try {
@@ -1910,19 +1904,28 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "calc(100vh - 240px)", minHeight: 500 }}>
-      <div style={{
-        display: "flex", alignItems: "center", gap: 12,
-        padding: "8px 14px", marginBottom: -4,
-        background: "rgba(124, 58, 237, 0.06)",
-        border: "1px solid rgba(124, 58, 237, 0.18)",
-        borderRadius: 8, fontSize: 12, color: "var(--text-dim)",
-      }}>
-        <span style={{ fontSize: 16 }}>🎬</span>
-        <span>
-          <b style={{ color: "#7c3aed" }}>{t("banner.director_orchestrates")}</b>{" "}
-          {t("banner.director_explains")}
-        </span>
-      </div>
+      {!bannerDismissed && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: 12,
+          padding: "8px 14px", marginBottom: -4,
+          background: "rgba(124, 58, 237, 0.06)",
+          border: "1px solid rgba(124, 58, 237, 0.18)",
+          borderRadius: 8, fontSize: 12, color: "var(--text-dim)",
+        }}>
+          <span style={{ fontSize: 16 }}>🎬</span>
+          <span style={{ flex: 1 }}>
+            <b style={{ color: "#7c3aed" }}>{t("banner.director_orchestrates")}</b>{" "}
+            {t("banner.director_explains")}
+          </span>
+          <button
+            onClick={() => {
+              try { localStorage.setItem("ceo.banner.director.dismissed", "1"); } catch {}
+              setBannerDismissed(true);
+            }}
+            style={{ fontSize: 11, alignSelf: "flex-start", marginTop: 2 }}
+          >{t("banner.dismiss")}</button>
+        </div>
+      )}
       <SpecialistsSection project={project} onChanged={onChanged} />
       <SkillsPanel
         wf={wf}
@@ -2493,10 +2496,7 @@ function TemplatePickerModal({ projectId, onClose, onApplied }: TemplatePickerMo
   }, []);
 
   async function apply(key: string) {
-    if (!confirm(
-      "Apply this template? It will REPLACE the current playbook and add any missing agents " +
-      "(existing agents with the same name are kept).",
-    )) return;
+    if (!confirm(t("confirm.apply_template"))) return;
     setBusy(key);
     setErr(null);
     try {
