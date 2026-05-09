@@ -14,6 +14,7 @@ import type {
   Ticket,
   WorkflowPhase,
   ReviewVerdict,
+  DirectorConfig as SharedDirectorConfig,
 } from "@ceo/shared";
 import { runAgent, specFromAgent } from "./agents.js";
 import type { AgentContext } from "./agents.js";
@@ -27,14 +28,7 @@ import { diffWorktree } from "./git.js";
 
 // ---- Public types -----------------------------------------------------------
 
-export interface DirectorConfig {
-  project_brief?: string | null;
-  max_iterations?: number;
-  budget_usd?: number;
-  available_subagents?: string[];
-  ci_gate_command?: string;
-  ci_gate_timeout_sec?: number;
-}
+export type DirectorConfig = SharedDirectorConfig;
 
 export interface DirectorRunArgs {
   runId: string;
@@ -109,7 +103,7 @@ const SUBAGENT_BLACKLIST = new Set(["CTO", "Memory Curator", "Director"]);
 // ---- Main entry -------------------------------------------------------------
 
 export async function runDirectorPhase(args: DirectorRunArgs): Promise<DirectorResult> {
-  const cfg = (args.phase.director ?? {}) as DirectorConfig;
+  const cfg = (args.phase.director ?? args.project.workflow.director_config ?? {}) as DirectorConfig;
   const maxIter = cfg.max_iterations ?? DEFAULT_MAX_ITERATIONS;
   const budget = cfg.budget_usd ?? DEFAULT_BUDGET_USD;
 
@@ -234,7 +228,7 @@ async function callDirector(
   history: TurnRecord[],
   budget: { totalCost: number; budget: number; iter: number; maxIter: number; subagents: string[] },
 ): Promise<DirectorCallReturn> {
-  const cfg = (args.phase.director ?? {}) as DirectorConfig;
+  const cfg = (args.phase.director ?? args.project.workflow.director_config ?? {}) as DirectorConfig;
   const systemPrompt = buildDirectorSystemPrompt(budget.subagents, cfg, args.project);
   const prompt = buildDirectorTurnPrompt(args, history, budget);
 

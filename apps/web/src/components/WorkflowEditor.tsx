@@ -512,8 +512,11 @@ function buildFlow(
   activeByPhase: Map<string, ActiveRunSummary[]>,
   queuedTickets: Ticket[],
 ): { nodes: Node<PhaseNodeData>[]; edges: Edge[] } {
-  const entryPhaseId = wf.phases[0]?.id;
-  const nodes: Node<PhaseNodeData>[] = wf.phases.map((p, i) => ({
+  // Director is the implicit orchestrator and does not appear on the canvas —
+  // the user designs the playbook (phases) and Director runs above it.
+  const visiblePhases = wf.phases.filter((p) => p.kind !== "director");
+  const entryPhaseId = visiblePhases[0]?.id;
+  const nodes: Node<PhaseNodeData>[] = visiblePhases.map((p, i) => ({
     id: p.id,
     type: "phase",
     position: p.position ?? { x: 60 + i * 240, y: 120 },
@@ -551,7 +554,7 @@ function buildFlow(
   }
 
   const edges: Edge[] = [];
-  for (const p of wf.phases) {
+  for (const p of visiblePhases) {
     if (p.next) {
       const bypass = needsBypassArc(p.id, p.next);
       edges.push({
@@ -706,7 +709,6 @@ interface ToolbarProps {
   onAddAgent: () => void;
   onAddTask: (type: string) => void;
   onAddApproval: () => void;
-  onAddDirector: () => void;
   onAutoArrange: () => void;
   onAlignRows: () => void;
   onDistribute: () => void;
@@ -761,10 +763,6 @@ function WorkflowFloatingToolbar(props: ToolbarProps) {
               <button onClick={() => { props.onAddApproval(); setAddOpen(false); }}>
                 <span className="pop-icon" style={{ background: "#f59e0b" }}>⏸</span>
                 Approval gate
-              </button>
-              <button onClick={() => { props.onAddDirector(); setAddOpen(false); }}>
-                <span className="pop-icon" style={{ background: "#7c3aed" }}>🎬</span>
-                Director (orchestrator)
               </button>
             </div>
           )}
@@ -1034,26 +1032,6 @@ export function WorkflowEditor({ project, tickets }: Props) {
     });
   }
 
-  function addDirectorPhase() {
-    updateWf((next) => {
-      const id = `director${next.phases.length + 1}`;
-      const xs = next.phases.map((p) => p.position?.x ?? 0).concat([0]);
-      const x = Math.max(...xs) + 240;
-      const y = 120;
-      next.phases.push({
-        id,
-        kind: "director",
-        director: {
-          max_iterations: 12,
-          budget_usd: 8,
-        },
-        next: null,
-        position: { x, y },
-      });
-      setSelectedPhaseId(id);
-    });
-  }
-
   function addApprovalPhase() {
     updateWf((next) => {
       const id = `approve${next.phases.length + 1}`;
@@ -1150,7 +1128,6 @@ export function WorkflowEditor({ project, tickets }: Props) {
           onAddAgent={addPhase}
           onAddTask={addTaskPhase}
           onAddApproval={addApprovalPhase}
-          onAddDirector={addDirectorPhase}
           onAutoArrange={() => {
             const positions = autoArrange(wf!);
             updateWf((next) => {
@@ -1333,29 +1310,9 @@ export function WorkflowEditor({ project, tickets }: Props) {
                 >
                   Approval
                 </button>
-                <button
-                  type="button"
-                  className={selected.kind === "director" ? "primary" : ""}
-                  onClick={() => updatePhase(selected.id, {
-                    kind: "director",
-                    director: selected.director ?? { max_iterations: 12, budget_usd: 8 },
-                    agent_id: undefined,
-                    task: undefined,
-                    approval: undefined,
-                    routes: null,
-                    command: undefined,
-                    working_dir: undefined,
-                    timeout_sec: undefined,
-                  })}
-                  style={{ flex: 1 }}
-                >
-                  🎬 Director
-                </button>
               </div>
               <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
-                {selected.kind === "director"
-                  ? "Top-level Claude orchestrator. Dispatches sub-agents turn-by-turn until done. Replaces the rest of the workflow."
-                  : selected.kind === "approval"
+                {selected.kind === "approval"
                   ? "Pauses the run until you click Approve / Reject in the run view."
                   : getTaskKindForPhase(selected) !== null
                   ? "Deterministic action — no AI, no tokens. ok=true → next; ok=false → retry target."

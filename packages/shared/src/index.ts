@@ -304,10 +304,29 @@ export interface WorkflowPhase {
   position?: { x: number; y: number } | null;
 }
 
+/** Project-level Director configuration. Director is the implicit orchestrator
+ *  that runs every workflow as a playbook — it is not a phase in the graph. */
+export interface DirectorConfig {
+  /** Project-specific brief appended to Director's system prompt. */
+  project_brief?: string | null;
+  /** Hard guard against runaway loops. Default 12. */
+  max_iterations?: number;
+  /** Total budget in USD across Director + sub-agents. Default 8. */
+  budget_usd?: number;
+  /** Subset of project agents Director may dispatch (by name). Default: all (minus blacklist). */
+  available_subagents?: string[];
+  /** Override CI command for run_ci_gate; falls back to a workflow phase named "ci_gate". */
+  ci_gate_command?: string;
+  ci_gate_timeout_sec?: number;
+}
+
 export interface WorkflowDefinition {
   phases: WorkflowPhase[];
   /** Project-specific context injected into every agent's prompt for this workflow. */
   project_specifics?: string | null;
+  /** Director (orchestrator) configuration for this workflow. Director runs above
+   *  the graph as an invisible engine — phases serve as its playbook. */
+  director_config?: DirectorConfig | null;
 }
 
 /** A workflow definition that does not yet know agent ids — resolved per-project on read. */

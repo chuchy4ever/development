@@ -17,7 +17,7 @@ import { loadAgent, loadProject, loadProjectWithRepos, loadRun, loadTicket, toda
 import { runAgent, specFromAgent } from "./agents.js";
 import { AGENT_NAMES } from "./defaultAgents.js";
 import type { AgentContext } from "./agents.js";
-import type { ReviewVerdict, TestVerdict, WorkflowDefinition } from "@ceo/shared";
+import type { ReviewVerdict, TestVerdict, WorkflowDefinition, WorkflowPhase } from "@ceo/shared";
 import { buildRunClaudeMd, writeRunClaudeMd } from "./runClaudeMd.js";
 import { applyMemoryUpdate, readAgentMemory } from "./agentMemory.js";
 import { applyProjectMemoryUpdate } from "./projectMemory.js";
@@ -271,10 +271,22 @@ async function executeRun(args: {
       onStderr: (chunk: string) => emit(runId, "stderr", chunk),
     };
 
-    // ---- Walk the project's workflow definition (entry = phases[0], follow .next) ----
+    // ---- Walk the project's workflow definition --------------------------------
+    // Director is the implicit orchestrator: every run starts with a synthesized
+    // Director phase that uses the user's workflow.phases as a playbook. The user
+    // designs the graph normally; Director runs above it. If the workflow already
+    // contains an explicit director phase (legacy), we use it as-is.
     const workflow: WorkflowDefinition = project.workflow;
     const phases = workflow.phases;
     const phaseById = new Map(phases.map((p) => [p.id, p]));
+    const IMPLICIT_DIRECTOR_ID = "__director__";
+    const hasExplicitDirector = phases.some((p) => p.kind === "director");
+    const implicitDirector: WorkflowPhase | null = hasExplicitDirector ? null : {
+      id: IMPLICIT_DIRECTOR_ID,
+      kind: "director",
+      // Director config comes from the workflow (project-level settings).
+      director: workflow.director_config ?? undefined,
+    };
     const attemptsByPhase = resume?.attemptsByPhase
       ? new Map<string, number>(resume.attemptsByPhase)
       : new Map<string, number>();
@@ -289,7 +301,14 @@ async function executeRun(args: {
 
     let phase: typeof phases[number] | undefined;
     if (resume?.startPhaseId) {
-      phase = phases.find((p) => p.id === resume.startPhaseId);
+      // Resuming: lookup explicit phase, fall back to the implicit Director if
+      // the previous run was driven by it (since the implicit Director is
+      // stateless and re-synthesized fresh, restart it from scratch).
+      if (resume.startPhaseId === IMPLICIT_DIRECTOR_ID && implicitDirector) {
+        phase = implicitDirector;
+      } else {
+        phase = phases.find((p) => p.id === resume.startPhaseId);
+      }
       if (!phase) {
         emit(runId, "system", {
           msg: `Resume aborted: phase "${resume.startPhaseId}" no longer exists in workflow (workflow was edited?). Re-run the ticket to start fresh.`,
@@ -298,7 +317,10 @@ async function executeRun(args: {
         return;
       }
     } else {
-      phase = phases[0];
+      // Director runs over every workflow as the implicit orchestrator. If the
+      // workflow has an explicit director phase, the engine still walks normally
+      // and the explicit one will be executed when reached.
+      phase = implicitDirector ?? phases[0];
     }
 
     // On resume, recompute diffs so downstream phases (Senior, Reviewer, Tester,
