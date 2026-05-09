@@ -511,7 +511,7 @@ function renderPlaybook(project: ProjectWithRepos): string {
       if (p.notes) sections.push(`    notes: ${p.notes.slice(0, 200)}${p.notes.length > 200 ? "…" : ""}`);
       // Note: next / retry_target / routes / max_attempts are no longer
       // rendered. Those were graph-canvas hints; orchestration belongs to
-      // Playbooks (use_playbook) and code-level guardrails. Keeping the
+      // run_playbook_phase (canonical step) and code-level guardrails. Keeping the
       // schema fields for back-compat with old workflows but they no
       // longer leak into Director's prompt.
     }

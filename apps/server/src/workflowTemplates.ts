@@ -45,21 +45,17 @@ function templatePath(key: string): string {
 function phpTeamTemplate(): WorkflowPreset {
   // Mirrors what scripts/setup-php-workflow.mjs writes — bundled so users can
   // clone it into a fresh project without running CLI.
+  //
+  // Tech Lead intentionally absent: routing is Director's job (decides
+  // trivial vs design-needed vs decompose on the first turn). Templates
+  // shipping with ceo reflect that.
   return {
     key: "php-team",
     name: "PHP team",
     description:
-      "Tech Lead routes to Architect or Junior. Junior writes the bulk; Senior is the finisher (no bouncing). Reviewer/Closer retry to Senior on issues.",
+      "Architect produces a plan when design is needed; Junior writes the bulk; Senior is the escalation. Reviewer/Closer retry to Senior on issues. Director routes the ticket on its first turn — no Tech Lead step.",
     source: "builtin",
     agents: [
-      {
-        name: "Tech Lead",
-        role: "coder",
-        category: "Strategy",
-        system_prompt: promptByKey("tech_lead"),
-        model: "claude-sonnet-4-6",
-        allowed_tools: ["Read", "Grep", "Glob"],
-      },
       {
         name: "Architect",
         role: "coder",
@@ -110,13 +106,6 @@ function phpTeamTemplate(): WorkflowPreset {
       },
     ],
     phases: [
-      {
-        id: "tech_lead",
-        agent_name: "Tech Lead",
-        next: "php_junior",
-        routes: { architect: "architect", dev: "php_junior" },
-        position: { x: 60, y: 240 },
-      },
       { id: "architect", agent_name: "Architect", next: "php_junior", position: { x: 240, y: 80 } },
       { id: "php_junior", agent_name: "PHP Junior Coder", next: "php_senior", position: { x: 420, y: 240 } },
       { id: "php_senior", agent_name: "PHP Senior Coder", next: "reviewer", position: { x: 600, y: 240 } },
@@ -154,14 +143,6 @@ function genericTeamTemplate(): WorkflowPreset {
       "Same shape as PHP team but with language-agnostic Junior/Senior. Use for non-PHP projects.",
     source: "builtin",
     agents: [
-      {
-        name: "Tech Lead",
-        role: "coder",
-        category: "Strategy",
-        system_prompt: promptByKey("tech_lead"),
-        model: "claude-sonnet-4-6",
-        allowed_tools: ["Read", "Grep", "Glob"],
-      },
       {
         name: "Junior Coder",
         role: "coder",
@@ -204,7 +185,6 @@ function genericTeamTemplate(): WorkflowPreset {
       },
     ],
     phases: [
-      { id: "tech_lead", agent_name: "Tech Lead", next: "junior", position: { x: 60, y: 240 } },
       { id: "junior", agent_name: "Junior Coder", next: "senior", position: { x: 240, y: 240 } },
       { id: "senior", agent_name: "Senior Coder", next: "reviewer", position: { x: 420, y: 240 } },
       { id: "reviewer", agent_name: "Reviewer", next: "tester", retry_target: "senior", max_attempts: 2, position: { x: 600, y: 240 } },
