@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactFlow, {
   BaseEdge,
   Background,
@@ -868,6 +868,297 @@ function NamedPlaybooksPanel({
   );
 }
 
+/* ─────────────────────── Stacked-panels editor (no graph) ──────────────── */
+
+/**
+ * Skills panel — agent phases as a flat list, grouped by capability category.
+ * Replaces the graph canvas for skills. Each row opens the existing edit
+ * modal on click. Add at the bottom.
+ */
+function SkillsPanel({
+  wf,
+  agentsById,
+  onSelect,
+  onAdd,
+}: {
+  wf: WorkflowDefinition;
+  agentsById: Map<string, Agent>;
+  onSelect: (phaseId: string) => void;
+  onAdd: () => void;
+}) {
+  const [open, setOpen] = useState(true);
+  const skills = wf.phases.filter((p) => (p.kind === "agent" || !p.kind) && p.id !== "__director__");
+
+  // Group by derived category
+  const byCategory = new Map<SkillCategory, WorkflowPhase[]>();
+  for (const s of skills) {
+    const a = s.agent_id ? agentsById.get(s.agent_id) : null;
+    const cat = deriveSkillCategory(s, a ? { name: a.name, role: a.role } : null);
+    if (!byCategory.has(cat)) byCategory.set(cat, []);
+    byCategory.get(cat)!.push(s);
+  }
+
+  return (
+    <CollapsibleSection
+      open={open}
+      onToggle={() => setOpen((o) => !o)}
+      title="Skills"
+      summary={`${skills.length} AI specialist${skills.length === 1 ? "" : "s"} Director can dispatch`}
+      icon="🧑‍💻"
+    >
+      {SKILL_CATEGORY_ORDER.map((cat) => {
+        const list = byCategory.get(cat);
+        if (!list || list.length === 0) return null;
+        return (
+          <div key={cat} style={{ marginTop: 8 }}>
+            <div style={{ fontSize: 11, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>
+              {SKILL_CATEGORY_LABEL[cat]}
+            </div>
+            {list.map((p) => {
+              const a = p.agent_id ? agentsById.get(p.agent_id) : null;
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => onSelect(p.id)}
+                  className="row-card"
+                  style={{ width: "100%", textAlign: "left" }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                    <div>
+                      <code style={{ background: "var(--gray-soft)", padding: "1px 6px", borderRadius: 4, fontSize: 11 }}>{p.id}</code>
+                      <span style={{ marginLeft: 8, fontWeight: 500 }}>{a?.name ?? "(missing agent)"}</span>
+                      {a?.model && <span style={{ marginLeft: 6, fontSize: 11, color: "var(--text-dim)" }}>· {a.model}</span>}
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                      {p.notes ? "📝 has notes · " : ""}{p.retry_target ? `↻ ${p.retry_target}` : ""}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        );
+      })}
+      <button onClick={onAdd} style={{ marginTop: 10 }}>+ Add skill</button>
+    </CollapsibleSection>
+  );
+}
+
+/**
+ * Gates panel — deterministic checks (shell tasks, approval, etc.).
+ */
+function GatesPanel({
+  wf,
+  onSelect,
+  onAddTask,
+  onAddApproval,
+}: {
+  wf: WorkflowDefinition;
+  onSelect: (phaseId: string) => void;
+  onAddTask: (type: string) => void;
+  onAddApproval: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const gates = wf.phases.filter((p) => p.kind === "task" || p.kind === "command" || p.kind === "approval");
+  return (
+    <CollapsibleSection
+      open={open}
+      onToggle={() => setOpen((o) => !o)}
+      title="Gates"
+      summary={`${gates.length} deterministic check${gates.length === 1 ? "" : "s"} (CI, lint, deploy, approval)`}
+      icon="🛡"
+    >
+      {gates.length === 0 && (
+        <div style={{ color: "var(--text-dim)", padding: "8px 0" }}>
+          No gates yet. Add ci_gate (composer ci), lint, deploy, or human approval.
+        </div>
+      )}
+      {gates.map((p) => {
+        const taskType = p.kind === "task" ? p.task?.type : p.kind === "approval" ? "approval" : "shell";
+        const meta = TASK_TYPES[taskType ?? "shell"];
+        return (
+          <button
+            key={p.id}
+            onClick={() => onSelect(p.id)}
+            className="row-card"
+            style={{ width: "100%", textAlign: "left" }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+              <div>
+                <span style={{
+                  display: "inline-block", width: 22, height: 22, lineHeight: "22px",
+                  textAlign: "center", borderRadius: 4, marginRight: 8,
+                  background: meta?.color ?? (p.kind === "approval" ? "#f59e0b" : "#666"),
+                  color: "#fff", fontSize: 11,
+                }}>{meta?.icon ?? (p.kind === "approval" ? "⏸" : "?")}</span>
+                <code style={{ background: "var(--gray-soft)", padding: "1px 6px", borderRadius: 4, fontSize: 11 }}>{p.id}</code>
+                <span style={{ marginLeft: 8, fontSize: 11, color: "var(--text-dim)" }}>
+                  {p.kind === "approval" ? "approval" : (meta?.label ?? taskType)}
+                </span>
+              </div>
+            </div>
+          </button>
+        );
+      })}
+      <div style={{ position: "relative", marginTop: 10 }}>
+        <button onClick={() => setAddOpen((o) => !o)}>+ Add gate</button>
+        {addOpen && (
+          <div className="wf-popover" style={{ position: "absolute", top: "100%", left: 0, marginTop: 4, zIndex: 10 }}>
+            {Object.entries(TASK_TYPES).map(([key, meta]) => (
+              <button
+                key={key}
+                onClick={() => { onAddTask(key); setAddOpen(false); }}
+              >
+                <span className="pop-icon" style={{ background: meta.color }}>{meta.icon}</span>
+                {meta.label}
+              </button>
+            ))}
+            <button onClick={() => { onAddApproval(); setAddOpen(false); }}>
+              <span className="pop-icon" style={{ background: "#f59e0b" }}>⏸</span>
+              Approval gate
+            </button>
+          </div>
+        )}
+      </div>
+    </CollapsibleSection>
+  );
+}
+
+/**
+ * Teams panel — capability groupings of agents. Director sees teams as a
+ * separate axis from skills ("which team handles this?").
+ */
+function TeamsPanel({
+  wf,
+  agents,
+  onChange,
+}: {
+  wf: WorkflowDefinition;
+  agents: Agent[];
+  onChange: (updater: (next: WorkflowDefinition) => void) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const teams = wf.teams ?? [];
+  return (
+    <CollapsibleSection
+      open={open}
+      onToggle={() => setOpen((o) => !o)}
+      title="Teams"
+      summary={`${teams.length} capability group${teams.length === 1 ? "" : "s"} of agents (devops / dev / review / security…)`}
+      icon="👥"
+    >
+      {teams.length === 0 && (
+        <div style={{ color: "var(--text-dim)", padding: "8px 0" }}>
+          No teams configured. Director treats agents individually. Add teams to give Director a clearer "who handles what" map.
+        </div>
+      )}
+      {teams.map((t, idx) => (
+        <div key={t.id} style={{
+          border: "1px solid var(--border)", borderRadius: 6, padding: 10, marginTop: 8, background: "var(--bg)",
+        }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+            <input
+              value={t.name}
+              placeholder="Dev Team"
+              onChange={(e) => onChange((next) => { if (next.teams) next.teams[idx]!.name = e.target.value; })}
+              style={{ flex: "0 0 180px" }}
+            />
+            <select
+              value={t.category ?? ""}
+              onChange={(e) => onChange((next) => { if (next.teams) next.teams[idx]!.category = (e.target.value || undefined) as SkillCategory | undefined; })}
+              style={{ flex: "0 0 130px" }}
+            >
+              <option value="">no category</option>
+              {SKILL_CATEGORY_ORDER.map((c) => (
+                <option key={c} value={c}>{SKILL_CATEGORY_LABEL[c]}</option>
+              ))}
+            </select>
+            <input
+              value={t.description ?? ""}
+              placeholder="when to reach for this team"
+              onChange={(e) => onChange((next) => { if (next.teams) next.teams[idx]!.description = e.target.value; })}
+              style={{ flex: 1 }}
+            />
+            <button
+              onClick={() => onChange((next) => { next.teams = (next.teams ?? []).filter((_, i) => i !== idx); })}
+              title="Remove team"
+            >×</button>
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>Members:</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+            {agents.map((a) => {
+              const member = t.agent_names.includes(a.name);
+              return (
+                <button
+                  key={a.id}
+                  onClick={() => onChange((next) => {
+                    const team = next.teams?.[idx];
+                    if (!team) return;
+                    if (team.agent_names.includes(a.name)) {
+                      team.agent_names = team.agent_names.filter((n) => n !== a.name);
+                    } else {
+                      team.agent_names = [...team.agent_names, a.name];
+                    }
+                  })}
+                  style={{
+                    fontSize: 11, padding: "2px 8px", borderRadius: 12,
+                    background: member ? "#7c3aed" : "var(--bg-elev)",
+                    color: member ? "#fff" : "var(--text)",
+                    border: `1px solid ${member ? "#7c3aed" : "var(--border)"}`,
+                  }}
+                >{a.name}</button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+      <button
+        style={{ marginTop: 10 }}
+        onClick={() => onChange((next) => {
+          if (!next.teams) next.teams = [];
+          const id = `team_${next.teams.length + 1}`;
+          next.teams.push({ id, name: `Team ${next.teams.length + 1}`, agent_names: [] });
+        })}
+      >+ Team</button>
+    </CollapsibleSection>
+  );
+}
+
+function CollapsibleSection({
+  open,
+  onToggle,
+  title,
+  summary,
+  icon,
+  children,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  title: string;
+  summary: string;
+  icon: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={{ border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-elev)" }}>
+      <button
+        onClick={onToggle}
+        style={{
+          width: "100%", padding: "10px 14px",
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          background: "transparent", border: 0, color: "var(--text)", cursor: "pointer",
+          textAlign: "left", fontSize: 13,
+        }}
+      >
+        <span><span style={{ marginRight: 8 }}>{icon}</span><b>{title}</b> <span style={{ color: "var(--text-dim)", fontWeight: 400 }}>· {summary}</span></span>
+        <span style={{ color: "var(--text-dim)" }}>{open ? "▾" : "▸"}</span>
+      </button>
+      {open && <div style={{ padding: "0 14px 12px", borderTop: "1px solid var(--border)" }}>{children}</div>}
+    </div>
+  );
+}
+
 interface ToolbarProps {
   busy: boolean;
   dirty: boolean;
@@ -998,6 +1289,7 @@ export function WorkflowEditor({ project, tickets }: Props) {
   const [dirty, setDirty] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
   const [showSaveTemplate, setShowSaveTemplate] = useState(false);
+  const [showLegacyGraph, setShowLegacyGraph] = useState(false);
 
   // Track dragging so we don't repeatedly write positions to wf during a drag.
   const draggingNodeId = useRef<string | null>(null);
@@ -1301,12 +1593,50 @@ export function WorkflowEditor({ project, tickets }: Props) {
           Solid arrows are escalation rules Director respects; dotted arrows are common follow-ups (advisory).
         </span>
       </div>
+      <SkillsPanel
+        wf={wf}
+        agentsById={agentsById}
+        onSelect={(id) => setSelectedPhaseId(id)}
+        onAdd={addPhase}
+      />
+      <GatesPanel
+        wf={wf}
+        onSelect={(id) => setSelectedPhaseId(id)}
+        onAddTask={addTaskPhase}
+        onAddApproval={addApprovalPhase}
+      />
+      <TeamsPanel
+        wf={wf}
+        agents={project.agents}
+        onChange={(updater) => updateWf(updater)}
+      />
       <NamedPlaybooksPanel
         wf={wf}
         agentsById={agentsById}
         onChange={(updater) => updateWf(updater)}
       />
-      <div className="wf-canvas-wrap">
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4, flexWrap: "wrap" }}>
+        <button onClick={save} disabled={busy || !dirty} className={dirty ? "primary" : ""}>
+          {busy ? "Saving…" : dirty ? "Save changes" : "Saved"}
+        </button>
+        <button onClick={() => setShowTemplates(true)} disabled={busy}>Apply template</button>
+        <button onClick={() => setShowSaveTemplate(true)} disabled={busy}>Save as template</button>
+        <button onClick={reset} disabled={busy}>Reset to default</button>
+        <label style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-dim)", display: "flex", alignItems: "center", gap: 4 }}>
+          <input
+            type="checkbox"
+            checked={showLegacyGraph}
+            onChange={(e) => setShowLegacyGraph(e.target.checked)}
+          />
+          show legacy graph (advanced)
+        </label>
+        {info && <span style={{ fontSize: 11, color: "var(--green)" }}>{info}</span>}
+        {err && <span style={{ fontSize: 11, color: "var(--red)" }}>{err}</span>}
+      </div>
+
+      {showLegacyGraph && (
+      <div className="wf-canvas-wrap" style={{ minHeight: 500 }}>
         <WorkflowFloatingToolbar
           busy={busy}
           dirty={dirty}
@@ -1396,6 +1726,7 @@ export function WorkflowEditor({ project, tickets }: Props) {
           Click any edge + Delete to disconnect.
         </div>
       </div>
+      )}
 
       <div className="settings-section" style={{ marginBottom: 0 }}>
         <h3>Project specifics for this playbook</h3>
