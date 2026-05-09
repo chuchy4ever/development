@@ -254,7 +254,7 @@ export interface WorkflowPhase {
    * "approval" pauses the run until a user explicitly approves or rejects
    * via API (human-in-the-loop gate).
    */
-  kind?: "agent" | "task" | "command" | "approval";
+  kind?: "agent" | "task" | "command" | "approval" | "director";
   /** Required when kind="agent". Reference to an agent in the same project. */
   agent_id?: string;
   /** Required when kind="task". */
@@ -263,6 +263,20 @@ export interface WorkflowPhase {
   approval?: {
     /** Markdown message shown to the approver. */
     message?: string | null;
+  };
+  /** Optional config for kind="director" (see director-pattern branch).
+   *  Director phase replaces the static graph with a Claude-driven dispatcher
+   *  that picks sub-agents turn-by-turn. Skeleton only on the director-pattern
+   *  branch; not wired into the engine yet. */
+  director?: {
+    /** Project-specific brief appended to Director's system prompt. */
+    project_brief?: string | null;
+    /** Hard guard against runaway loops. Default 12. */
+    max_iterations?: number;
+    /** Total budget in USD across Director + sub-agents. Default 8. */
+    budget_usd?: number;
+    /** Subset of project agents Director may dispatch (by name). Default: all. */
+    available_subagents?: string[];
   };
   // ---- legacy command fields (read-shim only; new writes use task.shell) ----
   command?: string;
