@@ -222,6 +222,33 @@ projectsRouter.put("/:id/workflow", (req, res) => {
       }
     }
   }
+  // Validate named Playbooks (optional). Each must have a unique name and
+  // every step must reference an existing phase id.
+  if (wf.playbooks) {
+    if (!Array.isArray(wf.playbooks)) {
+      return res.status(400).json({ error: "playbooks must be an array" });
+    }
+    const seen = new Set<string>();
+    for (const pb of wf.playbooks) {
+      if (!pb.name || typeof pb.name !== "string") {
+        return res.status(400).json({ error: "playbook name is required" });
+      }
+      if (seen.has(pb.name)) {
+        return res.status(400).json({ error: `duplicate playbook name "${pb.name}"` });
+      }
+      seen.add(pb.name);
+      if (!Array.isArray(pb.steps) || pb.steps.length === 0) {
+        return res.status(400).json({ error: `playbook "${pb.name}" must have at least one step` });
+      }
+      for (const step of pb.steps) {
+        if (!step.phase_id || !phaseIds.has(step.phase_id)) {
+          return res.status(400).json({
+            error: `playbook "${pb.name}" references unknown phase "${step.phase_id}"`,
+          });
+        }
+      }
+    }
+  }
   db.prepare(`UPDATE projects SET workflow_json = ?, updated_at = ? WHERE id = ?`)
     .run(JSON.stringify(wf), nowIso(), req.params.id);
   res.json(loadProjectWithRepos(req.params.id)!.workflow);

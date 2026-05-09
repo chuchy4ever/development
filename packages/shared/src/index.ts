@@ -382,6 +382,32 @@ export interface DirectorConfig {
   ci_gate_timeout_sec?: number;
 }
 
+/** Step within a named Playbook — a reference to a skill/gate (phase) the
+ *  Playbook walks in order. Director executes them sequentially when invoking
+ *  the Playbook, with optional per-step note overrides. */
+export interface PlaybookStep {
+  /** Phase id from WorkflowDefinition.phases. */
+  phase_id: string;
+  /** Optional addendum appended to the phase's notes for this Playbook only. */
+  notes_override?: string | null;
+  /** If true, Director may skip this step when its judgement says it's not
+   *  needed (e.g. an extra reviewer pass on a trivial change). Default false. */
+  optional?: boolean;
+}
+
+/** A named recipe Director can pick to solve a class of problem. Bundles an
+ *  ordered list of skills + gates with a "when to use" rule. Director sees
+ *  the Playbook registry in its system prompt and may dispatch one via the
+ *  use_playbook action. */
+export interface Playbook {
+  /** Unique within a workflow. */
+  name: string;
+  /** When to use this Playbook — read by Director when picking. */
+  description: string;
+  /** Ordered steps. Each step references a phase id from workflow.phases. */
+  steps: PlaybookStep[];
+}
+
 export interface WorkflowDefinition {
   phases: WorkflowPhase[];
   /** Project-specific context injected into every agent's prompt for this workflow. */
@@ -389,6 +415,9 @@ export interface WorkflowDefinition {
   /** Director (orchestrator) configuration for this workflow. Director runs above
    *  the graph as an invisible engine — phases serve as its playbook. */
   director_config?: DirectorConfig | null;
+  /** Named recipes Director can pick from. Optional — if absent, Director
+   *  composes ad-hoc dispatches from the skill/gate library directly. */
+  playbooks?: Playbook[];
 }
 
 /** A workflow definition that does not yet know agent ids — resolved per-project on read. */

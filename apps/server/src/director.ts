@@ -58,11 +58,12 @@ export interface DirectorResult {
 
 interface DispatchAction { action: "dispatch"; subagent: string; notes: string }
 interface CiGateAction { action: "run_ci_gate" }
-interface PlaybookAction { action: "run_playbook_phase"; phase_id: string; notes?: string }
+interface PlaybookPhaseAction { action: "run_playbook_phase"; phase_id: string; notes?: string }
+interface UsePlaybookAction { action: "use_playbook"; playbook: string; notes?: string }
 interface DecomposeAction { action: "request_decompose"; reason: string }
 interface DoneAction { action: "mark_done"; summary: string }
 interface GiveUpAction { action: "give_up"; reason: string }
-type DirectorAction = DispatchAction | CiGateAction | PlaybookAction | DecomposeAction | DoneAction | GiveUpAction;
+type DirectorAction = DispatchAction | CiGateAction | PlaybookPhaseAction | UsePlaybookAction | DecomposeAction | DoneAction | GiveUpAction;
 
 interface DirectorDecision {
   rationale: string;
@@ -230,6 +231,34 @@ export async function runDirectorPhase(args: DirectorRunArgs): Promise<DirectorR
       continue;
     }
 
+    if (action.action === "use_playbook") {
+      const playbook = (args.project.workflow.playbooks ?? []).find((p) => p.name === action.playbook);
+      if (!playbook) {
+        history.push({
+          iteration: iter,
+          decision,
+          outcome: { kind: "terminal", status: "failed", reason: `Playbook "${action.playbook}" not found` },
+        });
+        continue;
+      }
+      args.emit("system", { msg: `Director invoking playbook "${playbook.name}" (${playbook.steps.length} steps)` });
+      let bailOnFail = false;
+      for (const step of playbook.steps) {
+        if (totalCost >= budget) { bailOnFail = true; break; }
+        const stepNotes = [step.notes_override, action.notes].filter(Boolean).join("\n\n");
+        const outcome = await runPlaybookPhase(args, cfg, step.phase_id, stepNotes);
+        if (outcome.kind === "subagent") totalCost += outcome.cost_usd;
+        history.push({ iteration: iter, decision, outcome });
+        // Stop the playbook on hard failure unless the step is optional.
+        if (outcome.kind === "subagent" && outcome.ok === false && !step.optional) { bailOnFail = true; break; }
+        if (outcome.kind === "ci_gate" && outcome.ok === false && !step.optional) { bailOnFail = true; break; }
+      }
+      if (bailOnFail) {
+        args.emit("system", { msg: `Playbook "${playbook.name}" stopped early (failure or budget) — Director will decide next move` });
+      }
+      continue;
+    }
+
     args.emit("system", { msg: `Director returned unknown action: ${JSON.stringify(action)}` });
     return { ok: false, summary: `Unknown action`, iterations: iter, total_cost_usd: totalCost };
   }
@@ -364,6 +393,7 @@ function buildDirectorSystemPrompt(subagents: string[], cfg: DirectorConfig, pro
     : subagents.map((s) => `  - ${s}`).join("\n");
 
   const playbook = renderPlaybook(project);
+  const playbookRegistry = renderPlaybookRegistry(project);
 
   return `You are the Director — the lead orchestrator on this project. You are a tech lead who delegates work; you DO NOT write code or modify files yourself.
 
@@ -375,24 +405,30 @@ ${project.description || "(no description)"}
 
 ${cfg.project_brief ? `## Project brief\n${cfg.project_brief}\n` : ""}
 
-## Playbook (skills + gates available, grouped by capability)
+## Skills + gates available (grouped by capability)
 
 ${playbook}
 
-The playbook is a LIBRARY of named skills and gates this team has prepared for problems in this project. It is organized by what each one does, not by step order. You decide which skills to use, in what sequence, based on the ticket. The "common follow-up" hints record what tends to come next, but you may skip, reorder, parallelize, or revisit. Always close with a Validation gate (ci_gate) before mark_done.
+The library above is organized by what each skill/gate does, not by step order. You decide which to use, in what sequence, based on the ticket. The "common follow-up" hints record what tends to come next, but you may skip, reorder, parallelize, or revisit. Always close with a Validation gate (ci_gate) before mark_done.
+
+${playbookRegistry ? `## Named Playbooks (recipes for common problems)\n\n${playbookRegistry}\n\nWhen one of the named Playbooks matches the ticket, prefer use_playbook to walk it as a unit — it captures the team's known-good sequence for that problem class. You can still override or follow up with extra dispatches afterwards.\n` : ""}
 
 ## Available actions
 
 \`\`\`
 { "action": "dispatch", "subagent": "<name>", "notes": "<concrete instructions>" }
-{ "action": "run_playbook_phase", "phase_id": "<id from playbook>", "notes": "<optional override/addendum>" }
+{ "action": "run_playbook_phase", "phase_id": "<skill-or-gate-id>", "notes": "<optional override>" }
+{ "action": "use_playbook", "playbook": "<named-playbook>", "notes": "<optional addendum applied to every step>" }
 { "action": "run_ci_gate" }
 { "action": "request_decompose", "reason": "<why split>" }
 { "action": "mark_done", "summary": "<what was delivered>" }
 { "action": "give_up", "reason": "<concrete blocker>" }
 \`\`\`
 
-\`run_playbook_phase\` runs a phase from the playbook with its configured agent and notes — use it when the playbook node already captures what you want (e.g. \`ci_gate\` for the canonical CI command, \`reviewer\` for the standard review prompt). Use \`dispatch\` when you want a custom dispatch (different notes, different scope) or for ad-hoc work outside the playbook. \`run_ci_gate\` is shorthand for the playbook's \`ci_gate\` phase if it exists.
+- \`use_playbook\` runs a named recipe end-to-end (all its steps, in order). Steps stop early if a non-optional one fails. Best for problems that match a known pattern.
+- \`run_playbook_phase\` runs ONE skill/gate from the library with its configured agent and notes. Use when no named recipe fits but you want the canonical version of a step (e.g. \`ci_gate\`, \`reviewer\`).
+- \`dispatch\` is the most flexible: ad-hoc agent invocation with custom notes — use for novel work or when adapting a known skill to a new context.
+- \`run_ci_gate\` is shorthand for the canonical CI gate.
 
 ### Available sub-agents for dispatch:
 ${subagentList}
@@ -417,6 +453,37 @@ Reply with ONE JSON object on the LAST line of your response. Optionally include
   "action": { ... one of the actions above ... }
 }
 \`\`\``;
+}
+
+function renderPlaybookRegistry(project: ProjectWithRepos): string {
+  const list = project.workflow.playbooks ?? [];
+  if (list.length === 0) return "";
+  const phaseById = new Map(project.workflow.phases.map((p) => [p.id, p]));
+  const agentById = new Map(project.agents.map((a) => [a.id, a]));
+  const lines: string[] = [];
+  for (const pb of list) {
+    lines.push(`### ${pb.name}`);
+    if (pb.description) lines.push(`_${pb.description}_`);
+    lines.push("Steps:");
+    pb.steps.forEach((s, i) => {
+      const phase = phaseById.get(s.phase_id);
+      let label = s.phase_id;
+      if (phase?.kind === "agent" && phase.agent_id) {
+        const a = agentById.get(phase.agent_id);
+        if (a) label += ` (${a.name})`;
+      } else if (phase?.kind === "task") {
+        label += ` (${phase.task?.type ?? "gate"})`;
+      } else if (!phase) {
+        label += " (MISSING)";
+      }
+      const flags: string[] = [];
+      if (s.optional) flags.push("optional");
+      if (s.notes_override) flags.push(`notes: ${s.notes_override.slice(0, 60)}`);
+      lines.push(`  ${i + 1}. ${label}${flags.length ? ` — ${flags.join(", ")}` : ""}`);
+    });
+    lines.push("");
+  }
+  return lines.join("\n").trim();
 }
 
 function renderPlaybook(project: ProjectWithRepos): string {
@@ -518,6 +585,7 @@ function formatDecision(d: DirectorDecision): string {
   let act: string = a.action;
   if (a.action === "dispatch") act = `dispatch ${a.subagent}: ${a.notes.slice(0, 100)}`;
   if (a.action === "run_playbook_phase") act = `run_playbook_phase ${a.phase_id}${a.notes ? `: ${a.notes.slice(0, 80)}` : ""}`;
+  if (a.action === "use_playbook") act = `use_playbook ${a.playbook}${a.notes ? `: ${a.notes.slice(0, 80)}` : ""}`;
   if (a.action === "mark_done") act = `mark_done: ${a.summary.slice(0, 100)}`;
   if (a.action === "give_up") act = `give_up: ${a.reason.slice(0, 100)}`;
   if (a.action === "request_decompose") act = `request_decompose: ${a.reason.slice(0, 100)}`;

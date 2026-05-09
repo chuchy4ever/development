@@ -721,6 +721,153 @@ function autoArrange(
   return positions;
 }
 
+/**
+ * Collapsible panel above the canvas for managing named Playbooks.
+ *
+ * A Playbook is a recipe Director can pick: a name, when-to-use description,
+ * and an ordered list of skill/gate references. The user composes them from
+ * the existing skills/gates in the canvas; on apply, Director can call
+ * `use_playbook` to walk the whole recipe in one go.
+ */
+function NamedPlaybooksPanel({
+  wf,
+  agentsById,
+  onChange,
+}: {
+  wf: WorkflowDefinition;
+  agentsById: Map<string, Agent>;
+  onChange: (updater: (next: WorkflowDefinition) => void) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const playbooks = wf.playbooks ?? [];
+  const phases = wf.phases.filter((p) => p.kind !== "director");
+
+  const updatePlaybook = (idx: number, patch: Partial<{ name: string; description: string; steps: WorkflowDefinition["playbooks"] extends (infer U)[] | undefined ? U extends { steps: infer S } ? S : never : never }>) => {
+    onChange((next) => {
+      if (!next.playbooks) return;
+      const cur = next.playbooks[idx];
+      if (!cur) return;
+      Object.assign(cur, patch);
+    });
+  };
+
+  const phaseLabel = (phaseId: string) => {
+    const p = wf.phases.find((x) => x.id === phaseId);
+    if (!p) return `${phaseId} (missing)`;
+    if (p.kind === "agent" && p.agent_id) {
+      const a = agentsById.get(p.agent_id);
+      return `${phaseId}${a ? ` · ${a.name}` : ""}`;
+    }
+    if (p.kind === "task") return `${phaseId} · ${p.task?.type ?? "gate"} (gate)`;
+    if (p.kind === "approval") return `${phaseId} · approval`;
+    return phaseId;
+  };
+
+  return (
+    <div style={{
+      border: "1px solid var(--border)",
+      borderRadius: 8, fontSize: 12,
+      background: "var(--bg-elev)",
+    }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          width: "100%", padding: "8px 14px",
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          background: "transparent", border: 0, color: "var(--text)", cursor: "pointer",
+          textAlign: "left", fontSize: 13,
+        }}
+      >
+        <span><b>Named Playbooks</b> <span style={{ color: "var(--text-dim)" }}>· {playbooks.length} recipe{playbooks.length === 1 ? "" : "s"} Director can pick from</span></span>
+        <span style={{ color: "var(--text-dim)" }}>{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+        <div style={{ padding: "0 14px 12px", borderTop: "1px solid var(--border)" }}>
+          {playbooks.length === 0 && (
+            <div style={{ color: "var(--text-dim)", padding: "12px 0" }}>
+              No named Playbooks yet. Director composes ad-hoc dispatches from the skill/gate library.
+              Add a Playbook for a known-good recipe (e.g. "small_change", "feature", "bug_fix").
+            </div>
+          )}
+          {playbooks.map((pb, idx) => (
+            <div key={idx} style={{
+              border: "1px solid var(--border)", borderRadius: 6,
+              padding: 10, marginTop: 10, background: "var(--bg)",
+            }}>
+              <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+                <input
+                  value={pb.name}
+                  placeholder="recipe name (e.g. small_change)"
+                  onChange={(e) => updatePlaybook(idx, { name: e.target.value })}
+                  style={{ flex: "0 0 220px", fontFamily: "ui-monospace,monospace" }}
+                />
+                <input
+                  value={pb.description}
+                  placeholder="when to use (e.g. trivial endpoint addition, small bugfix)"
+                  onChange={(e) => updatePlaybook(idx, { description: e.target.value })}
+                  style={{ flex: 1 }}
+                />
+                <button
+                  onClick={() => onChange((next) => { next.playbooks = (next.playbooks ?? []).filter((_, i) => i !== idx); })}
+                  title="Remove playbook"
+                >×</button>
+              </div>
+              <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>Steps (Director walks them in order):</div>
+              {pb.steps.map((step, sIdx) => (
+                <div key={sIdx} style={{ display: "flex", gap: 6, marginBottom: 4, alignItems: "center" }}>
+                  <span style={{ color: "var(--text-dim)", width: 16 }}>{sIdx + 1}.</span>
+                  <select
+                    value={step.phase_id}
+                    onChange={(e) => onChange((next) => {
+                      const s = next.playbooks?.[idx]?.steps[sIdx];
+                      if (s) s.phase_id = e.target.value;
+                    })}
+                    style={{ flex: 1 }}
+                  >
+                    {phases.map((p) => (
+                      <option key={p.id} value={p.id}>{phaseLabel(p.id)}</option>
+                    ))}
+                  </select>
+                  <label style={{ display: "flex", gap: 4, alignItems: "center", color: "var(--text-dim)" }}>
+                    <input
+                      type="checkbox"
+                      checked={!!step.optional}
+                      onChange={(e) => onChange((next) => {
+                        const s = next.playbooks?.[idx]?.steps[sIdx];
+                        if (s) s.optional = e.target.checked || undefined;
+                      })}
+                    />
+                    optional
+                  </label>
+                  <button onClick={() => onChange((next) => {
+                    const pb2 = next.playbooks?.[idx];
+                    if (pb2) pb2.steps = pb2.steps.filter((_, i) => i !== sIdx);
+                  })} title="Remove step">×</button>
+                </div>
+              ))}
+              <button
+                style={{ marginTop: 4 }}
+                onClick={() => onChange((next) => {
+                  const pb2 = next.playbooks?.[idx];
+                  if (pb2 && phases[0]) pb2.steps.push({ phase_id: phases[0].id });
+                })}
+                disabled={phases.length === 0}
+              >+ step</button>
+            </div>
+          ))}
+          <button
+            style={{ marginTop: 10 }}
+            onClick={() => onChange((next) => {
+              if (!next.playbooks) next.playbooks = [];
+              next.playbooks.push({ name: `recipe_${next.playbooks.length + 1}`, description: "", steps: [] });
+            })}
+          >+ Named Playbook</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface ToolbarProps {
   busy: boolean;
   dirty: boolean;
@@ -1154,6 +1301,11 @@ export function WorkflowEditor({ project, tickets }: Props) {
           Solid arrows are escalation rules Director respects; dotted arrows are common follow-ups (advisory).
         </span>
       </div>
+      <NamedPlaybooksPanel
+        wf={wf}
+        agentsById={agentsById}
+        onChange={(updater) => updateWf(updater)}
+      />
       <div className="wf-canvas-wrap">
         <WorkflowFloatingToolbar
           busy={busy}
