@@ -222,6 +222,36 @@ projectsRouter.put("/:id/workflow", (req, res) => {
       }
     }
   }
+  // Validate Teams (optional). Names unique, ids unique, agent_names must
+  // resolve to actual project agents.
+  if (wf.teams) {
+    if (!Array.isArray(wf.teams)) {
+      return res.status(400).json({ error: "teams must be an array" });
+    }
+    const ids = new Set<string>();
+    const names = new Set<string>();
+    const agentNames = new Set(project.agents.map((a) => a.name));
+    for (const t of wf.teams) {
+      if (!t.id || typeof t.id !== "string") {
+        return res.status(400).json({ error: "team id is required" });
+      }
+      if (ids.has(t.id)) return res.status(400).json({ error: `duplicate team id "${t.id}"` });
+      ids.add(t.id);
+      if (!t.name || typeof t.name !== "string") {
+        return res.status(400).json({ error: `team "${t.id}" name is required` });
+      }
+      if (names.has(t.name)) return res.status(400).json({ error: `duplicate team name "${t.name}"` });
+      names.add(t.name);
+      if (!Array.isArray(t.agent_names)) {
+        return res.status(400).json({ error: `team "${t.name}" agent_names must be an array` });
+      }
+      for (const n of t.agent_names) {
+        if (typeof n !== "string" || !agentNames.has(n)) {
+          return res.status(400).json({ error: `team "${t.name}" references unknown agent "${n}"` });
+        }
+      }
+    }
+  }
   // Validate named Playbooks (optional). Each must have a unique name and
   // every step must reference an existing phase id.
   if (wf.playbooks) {

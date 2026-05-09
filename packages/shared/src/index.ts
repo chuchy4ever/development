@@ -382,6 +382,23 @@ export interface DirectorConfig {
   ci_gate_timeout_sec?: number;
 }
 
+/** A Team is a lightweight grouping of agents that solve a class of problem
+ *  together (dev-team, review-team, infra-team, security, qa, …). Teams are
+ *  for Director's mental model and prompt clarity — they don't constrain
+ *  execution. An agent can belong to zero, one, or many teams. */
+export interface Team {
+  /** Unique within a workflow. */
+  id: string;
+  /** Display name (e.g. "Dev Team", "Security"). */
+  name: string;
+  /** When does Director reach for this team? */
+  description?: string;
+  /** Capability category — used for organization in the editor and in Director's prompt. */
+  category?: SkillCategory;
+  /** Names of agents on this team. References Agent.name within the project. */
+  agent_names: string[];
+}
+
 /** Step within a named Playbook — a reference to a skill/gate (phase) the
  *  Playbook walks in order. Director executes them sequentially when invoking
  *  the Playbook, with optional per-step note overrides. */
@@ -418,6 +435,10 @@ export interface WorkflowDefinition {
   /** Named recipes Director can pick from. Optional — if absent, Director
    *  composes ad-hoc dispatches from the skill/gate library directly. */
   playbooks?: Playbook[];
+  /** Teams (capability groupings of agents). Director sees them as a separate
+   *  axis from the Skills library — "which team handles this kind of problem?".
+   *  Optional — if empty, agents are treated individually. */
+  teams?: Team[];
 }
 
 /** A workflow definition that does not yet know agent ids — resolved per-project on read. */
