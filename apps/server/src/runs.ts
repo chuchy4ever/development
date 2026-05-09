@@ -361,6 +361,12 @@ async function executeRun(args: {
           issues: [],
         } as unknown as ReviewVerdict;
         lastExitCode = result.ok ? 0 : 1;
+        // Director aggregates its own sub-agent costs internally; merge into the run total.
+        if (result.total_cost_usd > 0) {
+          totalCostUsd += result.total_cost_usd;
+          db.prepare(`UPDATE runs SET total_cost_usd = ? WHERE id = ?`)
+            .run(totalCostUsd, runId);
+        }
         emit(runId, "phase_end", {
           role: "director",
           phase_id: phase.id,
