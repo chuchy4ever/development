@@ -12,6 +12,7 @@ import { startScheduler } from "./scheduler.js";
 import { backfillAllProjects } from "./seedAgents.js";
 import { backfillTicketKeys } from "./backfillTicketKeys.js";
 import { cleanupOldRunArtifacts, resumeOrphanedRuns } from "./runs.js";
+import { startTelegramBot } from "./telegramBot.js";
 
 const app = express();
 app.use(cors());
@@ -47,4 +48,6 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 
 app.listen(PORT, () => {
   console.log(`[ceo] server listening on http://localhost:${PORT}`);
+  // Telegram bot is opt-in; only fires if TELEGRAM_BOT_TOKEN is set.
+  startTelegramBot();
 });

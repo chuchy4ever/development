@@ -13,6 +13,25 @@ export const CLAUDE_BIN =
 
 export const PORT = Number(process.env.PORT ?? 4000);
 
+// ---- Telegram bot (optional) ----
+// When TELEGRAM_BOT_TOKEN is set, the server starts a long-polling bot that
+// turns whitelisted users' messages into tickets and starts Director runs.
+// Replies (ack + final status) go back to the originating chat.
+export const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
+/** Comma-separated whitelist of Telegram user ids (numeric) allowed to use
+ *  the bot. Empty = bot stays disabled (don't open ticket creation to the
+ *  public Telegram by accident). */
+export const TELEGRAM_ALLOWED_USER_IDS = (process.env.TELEGRAM_ALLOWED_USER_IDS ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter((s) => s.length > 0);
+/** Default project id new tickets go into when the user doesn't prefix the
+ *  message with @<project>. Falls back to the first project if unset. */
+export const TELEGRAM_DEFAULT_PROJECT_ID = process.env.TELEGRAM_DEFAULT_PROJECT_ID ?? "";
+/** Optional. If set and the project has a Playbook with this name, the
+ *  ticket is created with triage_notes hinting Director to pick it. */
+export const TELEGRAM_DEFAULT_PLAYBOOK = process.env.TELEGRAM_DEFAULT_PLAYBOOK ?? "small_change";
+
 export function ensureDirs() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.mkdirSync(PROJECTS_DIR, { recursive: true });
