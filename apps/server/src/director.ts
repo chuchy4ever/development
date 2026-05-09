@@ -404,7 +404,11 @@ function buildDirectorSystemPrompt(subagents: string[], cfg: DirectorConfig, pro
 
   const playbook = renderPlaybook(project);
   const playbookRegistry = renderPlaybookRegistry(project);
-  const teamsRegistry = renderTeams(project);
+  // Teams concept dropped — SkillCategory on each phase already groups
+  // agents by capability for Director's prompt. The Skills library section
+  // below is rendered in category groups, which makes the Teams section
+  // redundant labelware.
+  void project;
 
   return `You are the Director — the lead orchestrator on this project. You are a tech lead who delegates work; you DO NOT write code or modify files yourself.
 
@@ -416,7 +420,7 @@ ${project.description || "(no description)"}
 
 ${cfg.project_brief ? `## Project brief\n${cfg.project_brief}\n` : ""}
 
-${teamsRegistry ? `## Teams (capability groups of agents)\n\n${teamsRegistry}\n\nTeams are how this organization thinks about specialists. When the ticket clearly belongs to one team's domain (e.g. "infra change" → infra team, "code review" → review team), prefer dispatching agents from that team.\n\n` : ""}## Skills + gates available (grouped by capability)
+## Skills + gates available (grouped by capability)
 
 ${playbook}
 
@@ -466,36 +470,9 @@ Reply with ONE JSON object on the LAST line of your response. Optionally include
 \`\`\``;
 }
 
-function renderTeams(project: ProjectWithRepos): string {
-  const teams = project.workflow.teams ?? [];
-  if (teams.length === 0) return "";
-  const agentByName = new Map(project.agents.map((a) => [a.name, a]));
-  const lines: string[] = [];
-  // Group teams by category for prompt clarity.
-  const byCategory = new Map<SkillCategory, typeof teams>();
-  for (const t of teams) {
-    const cat = t.category ?? "general";
-    if (!byCategory.has(cat)) byCategory.set(cat, []);
-    byCategory.get(cat)!.push(t);
-  }
-  for (const cat of SKILL_CATEGORY_ORDER) {
-    const list = byCategory.get(cat);
-    if (!list || list.length === 0) continue;
-    lines.push(`### ${SKILL_CATEGORY_LABEL[cat]}`);
-    for (const t of list) {
-      lines.push(`- **${t.name}**${t.description ? ` — ${t.description}` : ""}`);
-      const members = t.agent_names
-        .map((n) => {
-          const a = agentByName.get(n);
-          return a ? `${n} (${a.role}${a.model ? `, ${a.model}` : ""})` : `${n} (missing)`;
-        })
-        .join(", ");
-      if (members) lines.push(`    members: ${members}`);
-    }
-    lines.push("");
-  }
-  return lines.join("\n").trim();
-}
+// renderTeams() removed — Teams concept dropped in favour of SkillCategory
+// (each phase already carries a category that groups agents by capability,
+// which is the same axis the Teams section was duplicating).
 
 function renderPlaybookRegistry(project: ProjectWithRepos): string {
   const list = project.workflow.playbooks ?? [];

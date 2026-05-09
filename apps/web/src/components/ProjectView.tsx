@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import type { ActiveRunSummary, ProjectWithRepos, Ticket } from "@ceo/shared";
+import type { SkillCategory } from "@ceo/shared";
 import { SKILL_CATEGORY_LABEL, SKILL_CATEGORY_ORDER } from "@ceo/shared";
 import { api } from "../api";
 import { t, useLang } from "../i18n";
@@ -154,7 +155,7 @@ export function ProjectView({ project, route, navigate, onChanged, onDeleted }: 
               }}
             />
             <ProjectStats project={project} />
-            <TeamBoards project={project} activeRuns={activeRuns} tickets={tickets} onCardClick={setOpenTicket} />
+            <CategoryLanes project={project} activeRuns={activeRuns} tickets={tickets} onCardClick={setOpenTicket} />
             <Kanban
               tickets={tickets}
               activeRuns={activeRuns}
@@ -200,12 +201,17 @@ export function ProjectView({ project, route, navigate, onChanged, onDeleted }: 
 
 
 /**
- * TeamBoards — strip of mini-boards, one per team, showing the tickets
- * currently being handled by that team (i.e., active runs whose dispatched
- * agent belongs to the team). Sits above the main Kanban for quick "where
- * is the work right now?" awareness.
+ * CategoryLanes — strip of mini-cards above the Kanban, one per
+ * SkillCategory that has at least one skill. Each card shows the active
+ * runs whose currently-dispatched agent's skill falls in that category
+ * (e.g. "AGA-12 — PHP Senior is in Coding"). Idle categories show a count
+ * of resident skills so the user always sees the project's capability
+ * surface.
+ *
+ * Replaces the dropped TeamBoards strip; the Teams concept was redundant
+ * with SkillCategory.
  */
-function TeamBoards({
+function CategoryLanes({
   project,
   activeRuns,
   tickets,
@@ -216,62 +222,72 @@ function TeamBoards({
   tickets: Ticket[];
   onCardClick: (t: Ticket) => void;
 }) {
-  const teams = project.workflow.teams ?? [];
-  // Memoize all derived collections — Board polls these inputs every 2.5s,
-  // and rebuilding the maps on every poll is wasted work when nothing changed.
-  const sortedTeams = useMemo(
-    () => [...teams].sort((a, b) => {
-      const ai = SKILL_CATEGORY_ORDER.indexOf(a.category ?? "general");
-      const bi = SKILL_CATEGORY_ORDER.indexOf(b.category ?? "general");
-      return ai - bi;
-    }),
-    [teams],
-  );
   const ticketById = useMemo(() => new Map(tickets.map((t) => [t.id, t])), [tickets]);
-  const runsByTeam = useMemo(() => {
-    const teamByAgentName = new Map<string, typeof teams>();
-    for (const tm of teams) {
-      for (const n of tm.agent_names) {
-        const list = teamByAgentName.get(n) ?? [];
-        list.push(tm);
-        teamByAgentName.set(n, list);
-      }
+  // Map agent id → SkillCategory based on the phase that uses that agent.
+  // Falls back to deriveSkillCategory when no phase explicitly references it.
+  const phasesByAgentId = useMemo(() => {
+    const m = new Map<string, SkillCategory>();
+    for (const p of project.workflow.phases) {
+      if (p.kind && p.kind !== "agent") continue;
+      if (!p.agent_id) continue;
+      const a = project.agents.find((x) => x.id === p.agent_id);
+      const cat: SkillCategory = (p.category as SkillCategory | undefined)
+        ?? (a ? deriveAgentCategory(a) : "general");
+      m.set(p.agent_id, cat);
     }
-    const out = new Map<string, ActiveRunSummary[]>();
+    return m;
+  }, [project.workflow.phases, project.agents]);
+
+  // Categories that actually have skills in this project (don't render empty
+  // lanes for capabilities the user never set up).
+  const populatedCategories = useMemo(() => {
+    const cats = new Set<SkillCategory>();
+    for (const c of phasesByAgentId.values()) cats.add(c);
+    return SKILL_CATEGORY_ORDER.filter((c) => cats.has(c));
+  }, [phasesByAgentId]);
+
+  // Group active runs by the category their current agent belongs to.
+  const runsByCategory = useMemo(() => {
+    const out = new Map<SkillCategory, ActiveRunSummary[]>();
     for (const r of activeRuns) {
-      const name = r.current_agent_name ?? "";
-      const matched = teamByAgentName.get(name) ?? [];
-      for (const tm of matched) {
-        const list = out.get(tm.id) ?? [];
-        list.push(r);
-        out.set(tm.id, list);
-      }
+      const agent = project.agents.find((a) => a.name === r.current_agent_name);
+      const cat: SkillCategory = (agent && phasesByAgentId.get(agent.id)) ?? "general";
+      if (!out.has(cat)) out.set(cat, []);
+      out.get(cat)!.push(r);
     }
     return out;
-  }, [teams, activeRuns]);
-  if (teams.length === 0) return null;
+  }, [activeRuns, project.agents, phasesByAgentId]);
 
+  // Skill count per category — rendered as the lane subhead.
+  const skillCountByCategory = useMemo(() => {
+    const out = new Map<SkillCategory, number>();
+    for (const c of phasesByAgentId.values()) out.set(c, (out.get(c) ?? 0) + 1);
+    return out;
+  }, [phasesByAgentId]);
+
+  if (populatedCategories.length === 0) return null;
   return (
     <div style={{ display: "flex", gap: 10, overflowX: "auto", padding: "8px 0 12px", marginBottom: 6 }}>
-      {sortedTeams.map((team) => {
-        const runs = runsByTeam.get(team.id) ?? [];
+      {populatedCategories.map((cat) => {
+        const runs = runsByCategory.get(cat) ?? [];
         const isActive = runs.length > 0;
+        const accent = `var(--cat-${cat})`;
         return (
           <div
-            key={team.id}
+            key={cat}
             style={{
               flex: "0 0 220px",
               minHeight: 96,
-              border: `1px solid ${isActive ? "var(--accent)" : "var(--border)"}`,
+              border: `1px solid ${isActive ? accent : "var(--border)"}`,
               borderRadius: 8,
-              background: isActive ? "rgba(124, 92, 255, 0.06)" : "var(--bg-elev)",
+              background: isActive ? `color-mix(in srgb, ${accent} 6%, transparent)` : "var(--bg-elev)",
               padding: 10,
             }}
           >
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
-              <b style={{ fontSize: 12 }}>{team.name}</b>
+              <b style={{ fontSize: 12, color: accent }}>{SKILL_CATEGORY_LABEL[cat]}</b>
               <span style={{ fontSize: 10, color: "var(--text-dim)" }}>
-                {team.category ? SKILL_CATEGORY_LABEL[team.category] : ""}
+                {skillCountByCategory.get(cat) ?? 0} skill{skillCountByCategory.get(cat) === 1 ? "" : "s"}
               </span>
             </div>
             {!isActive && (
@@ -294,27 +310,38 @@ function TeamBoards({
                     width: "100%", textAlign: "left",
                     font: "inherit", color: "inherit",
                   }}
-                  title={r.ticket_title}
+                  title={`${r.current_agent_name ?? r.agent_role} · ${r.ticket_title}`}
                 >
                   <span style={{
                     display: "inline-block", width: 6, height: 6, borderRadius: "50%",
-                    background: "var(--accent)", animation: "pulse 1.4s ease-out infinite",
+                    background: accent, animation: "pulse 1.4s ease-out infinite",
                   }} />
-                  <span style={{ fontWeight: 600, color: "var(--accent)" }}>{r.ticket_key ?? r.ticket_id.slice(0, 6)}</span>
+                  <span style={{ fontWeight: 600, color: accent }}>{r.ticket_key ?? r.ticket_id.slice(0, 6)}</span>
                   <span style={{ color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {r.ticket_title.slice(0, 32)}{r.ticket_title.length > 32 ? "…" : ""}
                   </span>
                 </button>
               );
             })}
-            <div style={{ marginTop: 4, fontSize: 10, color: "var(--text-dim)" }}>
-              {t(team.agent_names.length === 1 ? "teams_strip.members_one" : "teams_strip.members_many", { count: team.agent_names.length })}
-            </div>
           </div>
         );
       })}
     </div>
   );
+}
+
+/** Quick category derivation for an agent without a phase context — same
+ *  rules as the shared deriveSkillCategory but on the agent shape. */
+function deriveAgentCategory(a: { name: string; role: string }): SkillCategory {
+  const n = a.name.toLowerCase();
+  if (n.includes("closer")) return "closing";
+  if (n.includes("devops")) return "infra";
+  if (n.includes("tech lead") || n.includes("architect") || n.includes("cto")) return "planning";
+  if (n.includes("lint")) return "review";
+  if (a.role === "reviewer") return "review";
+  if (a.role === "tester") return "validation";
+  if (a.role === "coder") return "coding";
+  return "general";
 }
 
 /**
