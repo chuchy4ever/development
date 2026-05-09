@@ -21,6 +21,7 @@ import { deriveSkillCategory, SKILL_CATEGORY_ORDER, SKILL_CATEGORY_LABEL } from 
 import { runAgent, specFromAgent } from "./agents.js";
 import type { AgentContext } from "./agents.js";
 import { loadAgent } from "./store.js";
+import { db } from "./db.js";
 import { streamClaude } from "./claude.js";
 import { extractJsonWithFallback } from "./jsonUtil.js";
 import { runTask } from "./tasks/index.js";
@@ -634,6 +635,14 @@ async function dispatchSubagent(
     model: dbAgent.model,
     notes: notes.slice(0, 300),
   });
+  // Reflect the live sub-agent in the runs row so the Kanban card +
+  // CategoryLanes strip + active-runs API show who's actually coding,
+  // not the stale "director" label that was set when the phase started.
+  // Reset to "director" in the finally-block below so the run looks like
+  // Director again between dispatches.
+  db.prepare(
+    "UPDATE runs SET agent_role = ?, current_agent_name = ? WHERE id = ?",
+  ).run(dbAgent.role, dbAgent.name, args.runId);
 
   const commitsBefore = await countWorktreeCommits(args.worktrees);
   const diffsBefore = await collectWorktreeDiffs(args.worktrees);
@@ -671,12 +680,23 @@ async function dispatchSubagent(
     onStderr: (chunk: string) => args.emit("stderr", { chunk }),
   };
 
+  // After dispatch returns (success or crash) we always restore the runs
+  // row to "director" so the next Director-think shows up that way until
+  // the next dispatch overwrites it again.
+  const restoreDirector = () => {
+    db.prepare(
+      "UPDATE runs SET agent_role = ?, current_agent_name = ? WHERE id = ?",
+    ).run("director", "director", args.runId);
+  };
+
   let r;
   try {
     r = await runAgent(spec, ctx, handlers, args.registerCancel);
     args.unregisterCancel();
+    restoreDirector();
   } catch (e: unknown) {
     args.unregisterCancel();
+    restoreDirector();
     const msg = e instanceof Error ? e.message : String(e);
     return {
       kind: "subagent",
