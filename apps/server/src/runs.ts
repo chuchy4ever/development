@@ -303,8 +303,9 @@ async function executeRun(args: {
     if (resume?.startPhaseId) {
       // Resuming: lookup explicit phase, fall back to the implicit Director if
       // the previous run was driven by it (since the implicit Director is
-      // stateless and re-synthesized fresh, restart it from scratch).
-      if (resume.startPhaseId === IMPLICIT_DIRECTOR_ID && implicitDirector) {
+      // stateless and re-synthesized fresh, restart it from scratch). Match
+      // both the friendly "director" display id and the internal sentinel.
+      if ((resume.startPhaseId === IMPLICIT_DIRECTOR_ID || resume.startPhaseId === "director") && implicitDirector) {
         phase = implicitDirector;
       } else {
         phase = phases.find((p) => p.id === resume.startPhaseId);
@@ -360,9 +361,12 @@ async function executeRun(args: {
       // and either decides mark_done / give_up / decompose, or hits its budget.
       if (phase.kind === "director") {
         emit(runId, "phase_start", { role: "director", phase_id: phase.id, attempt });
+        // Display "director" instead of the synthetic "__director__" id in the
+        // run record — the user shouldn't see internal sentinels.
+        const displayPhaseId = phase.id === IMPLICIT_DIRECTOR_ID ? "director" : phase.id;
         db.prepare(
           `UPDATE runs SET agent_role = ?, current_agent_name = ?, current_phase_id = ? WHERE id = ?`,
-        ).run("director", `director:${phase.id}`, phase.id, runId);
+        ).run("director", "director", displayPhaseId, runId);
 
         const { runDirectorPhase } = await import("./director.js");
         const result = await runDirectorPhase({
@@ -372,6 +376,7 @@ async function executeRun(args: {
           phase,
           worktrees,
           cwd,
+          recentRuns,
           emit: (event, payload) => emit(runId, event as RunEventType, payload),
           registerCancel: (c) => cancelHandles.set(runId, c),
           unregisterCancel: () => cancelHandles.delete(runId),

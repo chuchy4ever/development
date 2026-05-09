@@ -37,6 +37,8 @@ export interface DirectorRunArgs {
   phase: WorkflowPhase;
   worktrees: { repo_name: string; repo_path: string; base_branch: string; path: string }[];
   cwd: string;
+  /** Episodic memory: last N succeeded runs in this project (markdown). */
+  recentRuns?: string | null;
   emit: (event: string, payload: Record<string, unknown>) => void;
   registerCancel: (cancel: () => void) => void;
   unregisterCancel: () => void;
@@ -99,6 +101,10 @@ const DEFAULT_MAX_ITERATIONS = 12;
 const DEFAULT_BUDGET_USD = 8;
 const DIRECTOR_MODEL = "claude-sonnet-4-6";
 const SUBAGENT_BLACKLIST = new Set(["CTO", "Memory Curator", "Director"]);
+/** Hard cap on dispatches of any single sub-agent in one Director run. The
+ *  prompt asks for ≤4; this enforces it in code so a hallucinating Director
+ *  cannot loop forever on the same agent. */
+const MAX_DISPATCHES_PER_SUBAGENT = 4;
 
 // ---- Main entry -------------------------------------------------------------
 
@@ -150,6 +156,20 @@ export async function runDirectorPhase(args: DirectorRunArgs): Promise<DirectorR
     });
 
     const action = decision.action;
+
+    // Code-level guardrails (defense in depth — prompt rules can be ignored).
+    const guard = enforceGuardrails(action, history);
+    if (guard) {
+      args.emit("system", { msg: `Director guardrail: ${guard.reason}` });
+      // Append a synthetic outcome so Director sees the rejection on the next turn.
+      history.push({
+        iteration: iter,
+        decision,
+        outcome: { kind: "terminal", status: "failed", reason: `guardrail: ${guard.reason}` },
+      });
+      // Do NOT terminate — let Director see the feedback and pick another action.
+      continue;
+    }
 
     if (action.action === "mark_done") {
       history.push({ iteration: iter, decision, outcome: { kind: "terminal", status: "succeeded", reason: action.summary } });
@@ -216,6 +236,46 @@ export async function runDirectorPhase(args: DirectorRunArgs): Promise<DirectorR
   return { ok: false, summary: `Max iterations (${maxIter}) reached`, iterations: iter, total_cost_usd: totalCost };
 }
 
+// ---- Guardrails -------------------------------------------------------------
+
+/** Code-level rules that override Director's prompt instructions. Returns null
+ *  if the action is allowed, or a rejection with a reason for the next turn. */
+function enforceGuardrails(action: DirectorAction, history: TurnRecord[]): { reason: string } | null {
+  // 1) Hard cap: same sub-agent dispatched too many times.
+  if (action.action === "dispatch") {
+    const count = history.filter(
+      (t) => t.outcome.kind === "subagent" && t.outcome.subagent === action.subagent,
+    ).length;
+    if (count >= MAX_DISPATCHES_PER_SUBAGENT) {
+      return {
+        reason: `Sub-agent "${action.subagent}" already dispatched ${count}× (cap ${MAX_DISPATCHES_PER_SUBAGENT}). Pick a different sub-agent, escalate, request_decompose, or give_up.`,
+      };
+    }
+  }
+  if (action.action === "run_playbook_phase") {
+    // Playbook phases are also dispatches under the hood — enforce the same cap
+    // when they target an agent we can identify by phase id (best-effort).
+    const count = history.filter(
+      (t) => t.outcome.kind === "subagent" && t.outcome.subagent === `playbook:${action.phase_id}`,
+    ).length;
+    if (count >= MAX_DISPATCHES_PER_SUBAGENT) {
+      return {
+        reason: `Playbook phase "${action.phase_id}" already invoked ${count}× (cap ${MAX_DISPATCHES_PER_SUBAGENT}). Try a different phase or escalate.`,
+      };
+    }
+  }
+  // 2) mark_done requires at least one successful ci_gate in this run.
+  if (action.action === "mark_done") {
+    const ciGreen = history.some((t) => t.outcome.kind === "ci_gate" && t.outcome.ok === true);
+    if (!ciGreen) {
+      return {
+        reason: `mark_done blocked: no successful ci_gate in this run. Run ci_gate (or run_playbook_phase ci_gate) and confirm it passed before marking done.`,
+      };
+    }
+  }
+  return null;
+}
+
 // ---- Director call (single Claude turn) -------------------------------------
 
 interface DirectorCallReturn {
@@ -230,18 +290,30 @@ async function callDirector(
 ): Promise<DirectorCallReturn> {
   const cfg = (args.phase.director ?? args.project.workflow.director_config ?? {}) as DirectorConfig;
   const systemPrompt = buildDirectorSystemPrompt(budget.subagents, cfg, args.project);
-  const prompt = buildDirectorTurnPrompt(args, history, budget);
 
+  // Try once normally; if Director returns unparseable output, retry once with
+  // a strict reminder. Avoids burning a give_up on a one-off formatting glitch.
+  let { decision, cost } = await callDirectorOnce(args, systemPrompt, buildDirectorTurnPrompt(args, history, budget));
+  if (decision.action.action === "give_up" && decision.rationale.startsWith("Could not parse")) {
+    args.emit("system", { msg: "Director returned unparseable output — retrying with strict-JSON reminder." });
+    const strictPrompt = buildDirectorTurnPrompt(args, history, budget) +
+      "\n\nIMPORTANT: your previous reply was not parseable as JSON. Reply with ONE valid JSON object on the LAST line, no markdown fence required. Nothing after the JSON.";
+    const retry = await callDirectorOnce(args, systemPrompt, strictPrompt);
+    decision = retry.decision;
+    cost += retry.cost;
+  }
+  return { decision, cost };
+}
+
+async function callDirectorOnce(
+  args: DirectorRunArgs,
+  systemPrompt: string,
+  prompt: string,
+): Promise<DirectorCallReturn> {
   let stdoutBuf = "";
   let cost = 0;
-
   const { promise, cancel } = streamClaude(
-    {
-      prompt,
-      systemPrompt,
-      cwd: args.cwd,
-      model: DIRECTOR_MODEL,
-    },
+    { prompt, systemPrompt, cwd: args.cwd, model: DIRECTOR_MODEL },
     {
       onLine: (line) => {
         stdoutBuf += line + "\n";
@@ -250,9 +322,7 @@ async function callDirector(
           if (ev?.type === "result" && typeof ev.total_cost_usd === "number") {
             cost = ev.total_cost_usd;
           }
-        } catch {
-          /* not JSON */
-        }
+        } catch { /* not JSON */ }
       },
       onStderr: () => {},
     },
@@ -391,6 +461,11 @@ function buildDirectorTurnPrompt(
   ];
   if (args.ticket.triage_notes) {
     parts.push("", "## Triage notes", args.ticket.triage_notes);
+  }
+  // Episodic memory: only on the first turn (saves tokens on subsequent turns
+  // where the active history is more relevant).
+  if (history.length === 0 && args.recentRuns && args.recentRuns.trim()) {
+    parts.push("", "## Recent work in this project (episodic memory)", args.recentRuns.trim());
   }
   parts.push(
     "",
