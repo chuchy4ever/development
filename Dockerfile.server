@@ -1,0 +1,18 @@
+FROM node:20-bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 make g++ git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install dependencies (native addons compiled here)
+COPY package.json package-lock.json ./
+COPY apps/server/package.json ./apps/server/
+COPY apps/web/package.json ./apps/web/
+COPY packages/shared/package.json ./packages/shared/
+
+RUN npm install
+
+# Source is mounted at runtime for hot-reload (tsx watch)
+CMD ["npm", "run", "dev:server"]
