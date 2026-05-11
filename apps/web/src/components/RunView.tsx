@@ -105,7 +105,24 @@ export function RunView({ runId, onClose }: Props) {
     logEnd.current?.scrollIntoView({ behavior: "smooth" });
   }, [events.length]);
 
-  const diffs = useMemo(() => events.filter((e) => e.type === "diff"), [events]);
+  // Diffs: the engine emits one per repo per phase_end and re-emits the full
+  // set on each restart (tsx watch reload). Dedupe to latest-per-repo so the
+  // tab count + view both show the actual final state, not N stale snapshots.
+  const diffs = useMemo(() => {
+    const all = events.filter((e) => e.type === "diff");
+    const latest = new Map<string, UiEvent>();
+    for (const d of all) {
+      const repo = String(d.payload?.repo_name ?? "");
+      if (!repo) continue;
+      const prev = latest.get(repo);
+      if (!prev || new Date(d.ts).getTime() > new Date(prev.ts).getTime()) {
+        latest.set(repo, d);
+      }
+    }
+    return [...latest.values()].sort((a, b) =>
+      String(a.payload?.repo_name ?? "").localeCompare(String(b.payload?.repo_name ?? "")),
+    );
+  }, [events]);
   const [actionBusy, setActionBusy] = useState(false);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   /** Clicking a TeamFlowHeader pill filters LogView to only events from that
@@ -1062,6 +1079,7 @@ function summarizeInput(input: any): string {
 }
 
 function DiffView({ diffs }: { diffs: UiEvent[] }) {
+  // RunView already deduped to latest-per-repo, so render as-is.
   if (diffs.length === 0) {
     return <div style={{ color: "var(--text-dim)", padding: 20 }}>{t("run.no_diff")}</div>;
   }
