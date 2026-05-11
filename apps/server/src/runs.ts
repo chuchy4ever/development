@@ -401,9 +401,14 @@ async function executeRun(args: {
         // phase_end — the phase isn't ending, it's being suspended.
         if (result.paused) {
           const pauseReason = result.paused.reason;
-          const message = pauseReason === "budget_exhausted"
-            ? `Director paused: budget $${result.paused.budget_usd.toFixed(2)} exhausted at $${result.total_cost_usd.toFixed(2)}. Approve to extend budget by ~50% and resume; reject to cancel the run.`
-            : `Director needs your input: ${result.paused.question}\n\n(${result.paused.rationale})`;
+          let message: string;
+          if (pauseReason === "budget_exhausted") {
+            message = `Director paused: budget $${result.paused.budget_usd.toFixed(2)} exhausted at $${result.total_cost_usd.toFixed(2)}. Approve to extend budget by ~50% and resume; reject to cancel the run.`;
+          } else if (pauseReason === "max_iterations") {
+            message = `Director hit ${result.paused.max_iterations}-iteration limit after ${result.paused.iterations} turns. Typical cause: a long fix loop early in the run leaves no headroom for git_push + mark_done. Approve to extend by +10 iterations and let Director finish; reject to cancel.`;
+          } else {
+            message = `Director needs your input: ${result.paused.question}\n\n(${result.paused.rationale})`;
+          }
           emit(runId, "awaiting_approval", {
             phase_id: displayPhaseId,
             pause_reason: pauseReason,
@@ -1528,14 +1533,15 @@ function decideDirectorPause(
   const pauseReason = pauseRow?.pause_reason ?? "budget_exhausted";
 
   if (!approve) {
+    const cancelReasonLabel = pauseReason === "human_review" ? "human_review rejected"
+      : pauseReason === "max_iterations" ? "max-iterations extension rejected"
+      : "budget extension rejected";
     db.prepare(
       `UPDATE runs SET status = 'cancelled', finished_at = ?, error = ?, pause_reason = NULL WHERE id = ?`,
-    ).run(nowIso(), `cancelled: ${pauseReason === "human_review" ? "human_review rejected" : "budget extension rejected"}${note ? ` (${note})` : ""}`, runId);
+    ).run(nowIso(), `cancelled: ${cancelReasonLabel}${note ? ` (${note})` : ""}`, runId);
     db.prepare(`UPDATE tickets SET status = 'blocked', updated_at = ? WHERE id = ?`)
       .run(nowIso(), ticket.id);
     if (pauseReason === "human_review") {
-      // Persist the rejection so director's history rebuild on a hypothetical
-      // restart sees the resolved event (also gives an audit trail).
       emit(runId, "director_human_review_resolved", { approved: false, note: note ?? "" });
     }
     emit(runId, "system", { msg: `Director paused — rejected${note ? ` (${note})` : ""}. Run cancelled.` });
@@ -1545,16 +1551,28 @@ function decideDirectorPause(
 
   // Approve path. Behavior depends on why we paused.
   if (pauseReason === "human_review") {
-    // No budget change; just record the user's answer so director sees it on
-    // the next turn, then resume.
     emit(runId, "director_human_review_resolved", { approved: true, note: note ?? "" });
     emit(runId, "system", {
       msg: `Director resuming with user input${note ? `: ${note}` : " (no note)"}.`,
     });
     db.prepare(`UPDATE runs SET pause_reason = NULL WHERE id = ?`).run(runId);
+  } else if (pauseReason === "max_iterations") {
+    // Extend iteration cap by +10. Same pattern as budget extension but for
+    // turn budget. Typically used when Director burned early turns on fix
+    // loops and ran out before reaching git_push + mark_done.
+    const overrideRow = db
+      .prepare(`SELECT director_max_iter_override FROM runs WHERE id = ?`)
+      .get(runId) as { director_max_iter_override: number | null } | undefined;
+    const projectMaxIter = project.workflow.director_config?.max_iterations ?? null;
+    const currentMaxIter = overrideRow?.director_max_iter_override ?? projectMaxIter ?? 25;
+    const newMaxIter = currentMaxIter + 10;
+    db.prepare(`UPDATE runs SET director_max_iter_override = ?, pause_reason = NULL WHERE id = ?`)
+      .run(newMaxIter, runId);
+    emit(runId, "system", {
+      msg: `Director iterations extended: ${currentMaxIter} → ${newMaxIter} (+10). Resuming.`,
+    });
   } else {
-    // Budget pause: extend by 50% with $5 floor so a tiny initial budget still
-    // gains real headroom.
+    // Budget pause: extend by 50% with $5 floor.
     const overrideRow = db
       .prepare(`SELECT director_budget_override_usd FROM runs WHERE id = ?`)
       .get(runId) as { director_budget_override_usd: number | null } | undefined;

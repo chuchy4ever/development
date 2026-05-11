@@ -141,6 +141,11 @@ ensureColumn("runs", "reviewer_feedback", "reviewer_feedback TEXT");
 ensureColumn("projects", "daily_cost_cap_usd", "daily_cost_cap_usd REAL");
 ensureColumn("agents", "template_key", "template_key TEXT");
 ensureColumn("runs", "director_budget_override_usd", "director_budget_override_usd REAL");
+// Same pattern as budget override: when a paused run is approved with
+// reason="max_iterations", bump the iteration cap (default +10) so the
+// resumed Director gets headroom to finish. Without this, max_iter pauses
+// would just immediately re-hit the same limit on resume.
+ensureColumn("runs", "director_max_iter_override", "director_max_iter_override INTEGER");
 // Why is this run paused? Drives resume behavior in decideDirectorPause:
 //   'budget_exhausted' → approve bumps budget by ~50%
 //   'human_review'     → approve resumes without changes (Director asked for

@@ -58,7 +58,8 @@ export interface DirectorResult {
    *  so the user can extend budget (approve) or cancel (reject). */
   paused?:
     | { reason: "budget_exhausted"; budget_usd: number }
-    | { reason: "human_review"; question: string; rationale: string };
+    | { reason: "human_review"; question: string; rationale: string }
+    | { reason: "max_iterations"; iterations: number; max_iterations: number };
 }
 
 // ---- Decision schema --------------------------------------------------------
@@ -305,7 +306,7 @@ function rebuildHistoryFromEvents(
 
 // ---- Constants --------------------------------------------------------------
 
-const DEFAULT_MAX_ITERATIONS = 12;
+const DEFAULT_MAX_ITERATIONS = 25;
 const DEFAULT_BUDGET_USD = 20;
 const DIRECTOR_MODEL = "claude-sonnet-4-6";
 const SUBAGENT_BLACKLIST = new Set(["CTO", "Memory Curator", "Director"]);
@@ -318,12 +319,12 @@ const MAX_DISPATCHES_PER_SUBAGENT = 4;
 
 export async function runDirectorPhase(args: DirectorRunArgs): Promise<DirectorResult> {
   const cfg = (args.phase.director ?? args.project.workflow.director_config ?? {}) as DirectorConfig;
-  const maxIter = cfg.max_iterations ?? DEFAULT_MAX_ITERATIONS;
-  // Per-run budget override takes precedence (set when user approves a budget
-  // extension after a paused run). Falls back to project config, then default.
+  // Per-run overrides (set when user approves an extension after a paused run)
+  // take precedence over project config, which takes precedence over defaults.
   const overrideRow = db
-    .prepare("SELECT director_budget_override_usd FROM runs WHERE id = ?")
-    .get(args.runId) as { director_budget_override_usd: number | null } | undefined;
+    .prepare("SELECT director_budget_override_usd, director_max_iter_override FROM runs WHERE id = ?")
+    .get(args.runId) as { director_budget_override_usd: number | null; director_max_iter_override: number | null } | undefined;
+  const maxIter = overrideRow?.director_max_iter_override ?? cfg.max_iterations ?? DEFAULT_MAX_ITERATIONS;
   const budget =
     overrideRow?.director_budget_override_usd ?? cfg.budget_usd ?? DEFAULT_BUDGET_USD;
 
@@ -494,8 +495,22 @@ export async function runDirectorPhase(args: DirectorRunArgs): Promise<DirectorR
     return { ok: false, summary: `Unknown action`, iterations: iter, total_cost_usd: totalCost };
   }
 
-  args.emit("director_end", { reason: "max_iterations", iterations: iter, total_cost_usd: totalCost });
-  return { ok: false, summary: `Max iterations (${maxIter}) reached`, iterations: iter, total_cost_usd: totalCost };
+  // Out of iterations. Don't fail — pause as awaiting_approval so the user
+  // can extend by +10 iterations and let Director finish (typically just
+  // git_push + mark_done when CI is already green). Same UX as budget pause.
+  args.emit("director_paused", {
+    reason: "max_iterations",
+    iterations: iter,
+    max_iterations: maxIter,
+    total_cost_usd: totalCost,
+  });
+  return {
+    ok: false,
+    summary: `Paused: hit max iterations (${maxIter}). Approve to extend by +10 and finish; reject to cancel.`,
+    iterations: iter,
+    total_cost_usd: totalCost,
+    paused: { reason: "max_iterations", iterations: iter, max_iterations: maxIter },
+  };
 }
 
 // ---- Guardrails -------------------------------------------------------------
