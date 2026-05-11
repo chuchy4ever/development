@@ -489,8 +489,14 @@ function LogView({
     }),
     [events, iterByIndex, selectedIter, filters],
   );
+  const visibleFilterKeys = (["director","tools","phases","system","errors","diffs"] as FilterKey[]).filter((k) => !hidden.has(k));
+  // Only show the sticky filter strip when there's actually something in it:
+  // visible filter chips OR an active iteration filter. Empty strip rendered
+  // an awkward whitespace band above the log content.
+  const showFilterStrip = visibleFilterKeys.length > 0 || selectedIter !== null;
   return (
     <div style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}>
+      {showFilterStrip && (
       <div style={{
         position: "sticky", top: 0, zIndex: 5,
         display: "flex", flexWrap: "wrap", gap: 6,
@@ -514,7 +520,7 @@ function LogView({
             ✕ T{selectedIter}
           </button>
         )}
-        {(["director","tools","phases","system","errors","diffs"] as FilterKey[]).filter((k) => !hidden.has(k)).map((k) => (
+        {visibleFilterKeys.map((k) => (
           <button
             key={k}
             onClick={() => setFilters((f) => ({ ...f, [k]: !f[k] }))}
@@ -531,11 +537,14 @@ function LogView({
           </button>
         ))}
         <span style={{ flex: 1 }} />
-        <button
-          onClick={() => setFilters({ director: true, tools: true, phases: true, system: true, errors: true, diffs: true })}
-          style={{ fontSize: 11 }}
-        >{t("common.show_all")}</button>
+        {visibleFilterKeys.length > 0 && (
+          <button
+            onClick={() => setFilters({ director: true, tools: true, phases: true, system: true, errors: true, diffs: true })}
+            style={{ fontSize: 11 }}
+          >{t("common.show_all")}</button>
+        )}
       </div>
+      )}
       {filtered.length === 0 && (
         <div style={{ color: "var(--text-dim)", padding: 20, textAlign: "center" }}>
           {t("run.no_match")}
