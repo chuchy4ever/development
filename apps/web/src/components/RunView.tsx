@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import type { Run } from "@ceo/shared";
 import { api, streamRunEvents } from "../api";
 import { t, useLang } from "../i18n";
@@ -1105,21 +1105,72 @@ function DiffView({ diffs }: { diffs: UiEvent[] }) {
       {diffs.map((d) => (
         <div key={d.id} style={{ marginBottom: 16 }}>
           <h4 style={{ margin: "0 0 8px" }}>{d.payload?.repo_name}</h4>
-          <pre style={{
-            background: "var(--bg)",
-            border: "1px solid var(--border)",
-            borderRadius: 6,
-            padding: 12,
-            fontSize: 12,
-            overflow: "auto",
-            margin: 0,
-            maxHeight: "60vh",
-          }}>{d.payload?.diff || "(no changes)"}</pre>
+          <DiffPre raw={String(d.payload?.diff ?? "")} />
         </div>
       ))}
     </div>
   );
 }
+
+/** Render a unified diff with git-style color overlay:
+ *   - file headers (`diff --git`, `index`, `---`, `+++`) muted
+ *   - hunk headers (`@@`) accent-colored
+ *   - additions (`+`) green background
+ *   - deletions (`-`) red background
+ *   - context lines neutral
+ *  Single <pre> with per-line spans — keeps copy-to-clipboard intact and
+ *  preserves whitespace exactly. */
+function DiffPre({ raw }: { raw: string }) {
+  if (!raw.trim()) {
+    return (
+      <pre style={diffPreBaseStyle}>{"(no changes)"}</pre>
+    );
+  }
+  const lines = raw.split("\n");
+  return (
+    <pre style={diffPreBaseStyle}>
+      {lines.map((line, i) => {
+        let bg = "transparent";
+        let color = "var(--text)";
+        if (line.startsWith("+++") || line.startsWith("---")) {
+          color = "var(--text-dim)";
+        } else if (line.startsWith("diff --git") || line.startsWith("index ") || line.startsWith("new file mode") || line.startsWith("deleted file mode") || line.startsWith("similarity index") || line.startsWith("rename ")) {
+          color = "var(--text-dim)";
+        } else if (line.startsWith("@@")) {
+          color = "#7c5cff";
+          bg = "rgba(124, 92, 255, 0.08)";
+        } else if (line.startsWith("+")) {
+          bg = "rgba(34, 197, 94, 0.15)";
+          color = "#15803d";
+        } else if (line.startsWith("-")) {
+          bg = "rgba(239, 68, 68, 0.15)";
+          color = "#b91c1c";
+        }
+        return (
+          <span
+            key={i}
+            style={{ display: "block", background: bg, color, padding: "0 4px", marginLeft: -4, marginRight: -4 }}
+          >
+            {line || " "}
+          </span>
+        );
+      })}
+    </pre>
+  );
+}
+
+const diffPreBaseStyle: CSSProperties = {
+  background: "var(--bg)",
+  border: "1px solid var(--border)",
+  borderRadius: 6,
+  padding: "8px 0",
+  fontSize: 12,
+  overflow: "auto",
+  margin: 0,
+  maxHeight: "60vh",
+  fontFamily: "ui-monospace, SFMono-Regular, monospace",
+  lineHeight: 1.45,
+};
 
 /** Three-button verdict bar shown on completed runs. The chosen verdict
  *  highlights; clicking again clears it. Bad / broken_in_prod prompt for a
