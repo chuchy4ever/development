@@ -642,6 +642,11 @@ type FlowStep = {
   startedAt: number | null;
   ok: boolean | null | undefined;
   inProgress: boolean;
+  /** Set when the step never received a director_subagent_done event AND a
+   *  later director_decision came in — typically a tsx-watch reload that
+   *  killed the claude CLI process mid-dispatch. The work is gone; Director
+   *  retried from the next iteration. */
+  aborted?: boolean;
 };
 
 function TeamFlowHeader({
@@ -660,6 +665,18 @@ function TeamFlowHeader({
       const p = e.payload || {};
       const ts = new Date(e.ts).getTime();
       if (e.type === "director_decision") {
+        // A new decision arrived while the previous step never received a
+        // director_subagent_done. That happens on resume after the server
+        // was killed mid-dispatch (tsx watch reload, crash, etc.) — the
+        // claude CLI process was reaped, but the in-flight step is now
+        // orphaned. Mark it as aborted so the UI doesn't show it forever
+        // in the ⏳ blinking state.
+        const prev = list[list.length - 1];
+        if (prev?.inProgress && (prev.action === "dispatch" || prev.action === "run_playbook_phase" || prev.action === "dispatch_parallel" || prev.action === "fetch_context" || prev.action === "run_ci_gate")) {
+          prev.inProgress = false;
+          prev.ok = false;
+          prev.aborted = true;
+        }
         lastIter = p.iteration ?? lastIter + 1;
         const a = p.action ?? {};
         const action = a.action ?? "?";
@@ -714,15 +731,21 @@ function TeamFlowHeader({
     }}>
       <span style={{ fontSize: 11, color: "var(--text-dim)", marginRight: 4 }}>{t("run.flow")}</span>
       {steps.map((s, i) => {
-        const c = colorFor(s);
-        const okBadge = s.ok === true ? "✓" : s.ok === false ? "✗" : s.inProgress ? "⏳" : "";
+        const c = s.aborted ? "var(--text-dim)" : colorFor(s);
+        const okBadge = s.aborted ? "⊘" : s.ok === true ? "✓" : s.ok === false ? "✗" : s.inProgress ? "⏳" : "";
         const isSelected = selectedIter === s.iter;
         return (
           <span key={i} style={{ display: "flex", alignItems: "center", gap: 4 }}>
             <button
               type="button"
               onClick={() => onSelectIter(s.iter)}
-              title={isSelected ? "Klikni znovu pro zobrazení všech turnů" : `Zobrazit jen log z turnu T${s.iter}`}
+              title={
+                s.aborted
+                  ? `Turn T${s.iter} byl přerušen (server restart / crash uprostřed dispatche). Director ho zopakoval v dalším turnu.`
+                  : isSelected
+                    ? "Klikni znovu pro zobrazení všech turnů"
+                    : `Zobrazit jen log z turnu T${s.iter}`
+              }
               style={{
                 fontSize: 11,
                 padding: "3px 8px", borderRadius: 12,
