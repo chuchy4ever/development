@@ -3,6 +3,7 @@ import type { Priority, ProjectWithRepos, Run, Ticket, TicketStatus } from "@ceo
 import { api } from "../api";
 import { RunView } from "./RunView";
 import { useEscClose } from "../hooks";
+import { t, useLang } from "../i18n";
 
 interface Props {
   ticket: Ticket;
@@ -38,7 +39,8 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
   const parent = ticket.parent_ticket_id
     ? (allTickets ?? []).find((t) => t.id === ticket.parent_ticket_id) ?? null
     : null;
-  const children = (allTickets ?? []).filter((t) => t.parent_ticket_id === ticket.id);
+  const children = (allTickets ?? []).filter((tk) => tk.parent_ticket_id === ticket.id);
+  useLang();
 
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -137,8 +139,8 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
 
   async function del() {
     const msg = runs.length > 0
-      ? `Delete this ticket? ${runs.length} run(s) and their worktrees will be removed.`
-      : "Delete this ticket?";
+      ? t("tm.confirm.delete_with_runs", { count: runs.length })
+      : t("tm.confirm.delete");
     if (!confirm(msg)) return;
     setBusy(true);
     try {
@@ -179,13 +181,13 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
               </h2>
             )}
 
-            <button className="tm-close" onClick={onClose} title="Close (Esc)">✕</button>
+            <button className="tm-close" onClick={onClose} title={t("tm.close_title")}>✕</button>
           </header>
 
           <div className="tm-body">
             <main className="tm-main">
               {parent && (
-                <Section title="Parent">
+                <Section title={t("tm.section.parent")}>
                   <button
                     className="tm-link-row"
                     onClick={() => onOpenTicket?.(parent)}
@@ -197,10 +199,46 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
                 </Section>
               )}
 
+              {/* Active run prominent card — surfaces what's happening NOW
+                  instead of burying it in the Runs history list below. */}
+              {runs.find((r) => r.status === "running" || r.status === "pending" || r.status === "awaiting_approval") && (() => {
+                const active = runs.find((r) => r.status === "running" || r.status === "pending" || r.status === "awaiting_approval")!;
+                return (
+                  <Section title={t("tm.section.active_run")}>
+                    <button
+                      className="tm-link-row"
+                      onClick={() => setOpenRunId(active.id)}
+                      style={{
+                        background: "var(--accent-soft, rgba(124,92,255,0.08))",
+                        border: "1px solid var(--accent)",
+                        padding: "10px 12px",
+                      }}
+                    >
+                      <span style={{ flex: 1, textAlign: "left" }}>
+                        <b>{active.current_agent_name ?? t("tm.run.waiting_for_dispatch")}</b>
+                        <span style={{ color: "var(--text-dim)", marginLeft: 8, fontSize: 12 }}>
+                          · {active.branch}
+                        </span>
+                      </span>
+                      {typeof active.total_cost_usd === "number" && active.total_cost_usd > 0 && (
+                        <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                          {t("tm.run.cost", { cost: active.total_cost_usd.toFixed(2) })}
+                        </span>
+                      )}
+                      <span style={{
+                        fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 4,
+                        color: runStatusColor(active.status).fg,
+                        background: runStatusColor(active.status).bg,
+                      }}>{active.status}</span>
+                    </button>
+                  </Section>
+                );
+              })()}
+
               <Section
-                title="Description"
+                title={t("tm.section.description")}
                 action={!editingBody && (
-                  <button onClick={() => setEditingBody(true)}>Edit</button>
+                  <button onClick={() => setEditingBody(true)}>{t("tm.btn.edit")}</button>
                 )}
               >
                 {editingBody ? (
@@ -210,30 +248,30 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
                       value={bodyDraft}
                       onChange={(e) => setBodyDraft(e.target.value)}
                       rows={10}
-                      placeholder="(empty)"
+                      placeholder={t("tm.body.placeholder")}
                     />
                     <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-                      <button className="primary" onClick={saveBody} disabled={busy}>Save</button>
+                      <button className="primary" onClick={saveBody} disabled={busy}>{t("common.save")}</button>
                       <button onClick={() => { setEditingBody(false); setBodyDraft(ticket.body); }}>
-                        Cancel
+                        {t("common.cancel")}
                       </button>
                     </div>
                   </div>
                 ) : (
                   <div className="tm-prose" onClick={() => setEditingBody(true)}>
-                    {ticket.body || <span style={{ color: "var(--text-muted)" }}>(empty — click to add)</span>}
+                    {ticket.body || <span style={{ color: "var(--text-muted)" }}>{t("tm.body.empty")}</span>}
                   </div>
                 )}
               </Section>
 
               {ticket.triage_notes && (
-                <Section title="Triage notes">
+                <Section title={t("tm.section.triage_notes")}>
                   <div className="tm-callout">{ticket.triage_notes}</div>
                 </Section>
               )}
 
               {children.length > 0 && (
-                <Section title={`Subtasks (${children.filter((c) => c.status === "done").length}/${children.length} done)`}>
+                <Section title={t("tm.section.subtasks", { done: children.filter((c) => c.status === "done").length, total: children.length })}>
                   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                     {children.map((c) => (
                       <button
@@ -259,7 +297,7 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
               )}
 
               {runs.length > 0 && (
-                <Section title="Runs">
+                <Section title={t("tm.section.runs", { count: runs.length })}>
                   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                     {runs.map((r) => (
                       <button
@@ -295,13 +333,13 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
             </main>
 
             <aside className="tm-side">
-              <SideField label="Status">
+              <SideField label={t("tm.side.status")}>
                 <select value={ticket.status} onChange={(e) => setStatus(e.target.value as TicketStatus)} disabled={busy}>
                   {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
                 </select>
               </SideField>
 
-              <SideField label="Priority">
+              <SideField label={t("tm.side.priority")}>
                 <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                   {PRIORITIES.map((p) => (
                     <button
@@ -319,15 +357,15 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
                 </div>
               </SideField>
 
-              <SideField label="Workflow">
+              <SideField label={t("tm.side.workflow")}>
                 <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
-                  {ticket.workflow_template ?? "(set by Triage)"}
+                  {ticket.workflow_template ?? t("tm.side.workflow_unset")}
                 </div>
               </SideField>
 
-              <SideField label="Folders">
+              <SideField label={t("tm.side.folders")}>
                 {project.repos.length === 0 ? (
-                  <div style={{ fontSize: 12, color: "var(--text-muted)" }}>(no folders in project)</div>
+                  <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{t("tm.side.folders_empty")}</div>
                 ) : (
                   <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     {project.repos.map((r) => {
@@ -344,7 +382,7 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
               </SideField>
 
               {ticket.depends_on.length > 0 && (
-                <SideField label={`Depends on (${ticket.depends_on.length})`}>
+                <SideField label={t("tm.side.depends_on", { count: ticket.depends_on.length })}>
                   <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     {ticket.depends_on.map((dep) => {
                       const t = (allTickets ?? []).find((x) => x.id === dep);
@@ -374,21 +412,21 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
           )}
 
           <footer className="tm-footer">
-            <button className="danger" onClick={del} disabled={busy}>Delete</button>
+            <button className="danger" onClick={del} disabled={busy}>{t("common.delete")}</button>
             <div style={{ flex: 1 }} />
-            <button onClick={triage} disabled={busy} title="Run Triage agent">
-              {ticket.priority ? "Re-triage" : "Triage"}
+            <button onClick={triage} disabled={busy} title={t("tm.btn.triage_title")}>
+              {ticket.priority ? t("tm.btn.retriage") : t("tm.btn.triage")}
             </button>
-            <button onClick={decompose} disabled={busy} title="Run CTO to split into subtasks">
-              Decompose
+            <button onClick={decompose} disabled={busy} title={t("tm.btn.decompose_title")}>
+              {t("tm.btn.decompose")}
             </button>
             <button
               className="primary"
               onClick={startRun}
               disabled={busy || !canStartRun}
-              title={!canStartRun ? "Add a folder or wait for current run" : "Start Director run"}
+              title={!canStartRun ? t("tm.btn.start_run_disabled") : t("tm.btn.start_run")}
             >
-              {busy ? "..." : "▶ Start run"}
+              {busy ? "..." : t("tm.btn.start_run")}
             </button>
           </footer>
         </div>
