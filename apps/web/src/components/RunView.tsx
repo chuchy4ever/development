@@ -593,6 +593,23 @@ type AgentStat = {
   commits: number;
 };
 
+/** Display name for sub-agents in the breakdown. Most are real agent names
+ *  ("PHP Senior Coder") and pass through. Built-in gates like ci_gate and
+ *  task-routed phases (task:git_push) get a friendlier label. */
+function prettifyAgentName(raw: string): string {
+  if (raw === "ci_gate") return "CI gate";
+  if (raw === "parallel") return "Parallel batch";
+  if (raw.startsWith("task:")) {
+    const id = raw.slice("task:".length);
+    if (id === "git_push") return "Git push";
+    return id.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+  if (raw.startsWith("fetch_context:")) {
+    return `Fetch context (${raw.slice("fetch_context:".length)})`;
+  }
+  return raw;
+}
+
 function AgentBreakdown({ events }: { events: UiEvent[] }) {
   const { stats, totalCost } = useMemo(() => {
     type S = AgentStat & { pending: { startedAt: number } | null };
@@ -659,7 +676,7 @@ function AgentBreakdown({ events }: { events: UiEvent[] }) {
                   background: s.role === "coder" ? "var(--cat-coding)" : s.role === "reviewer" ? "var(--cat-review)" : s.role === "tester" ? "var(--cat-validation)" : s.role === "" ? "var(--cat-planning)" : "var(--cat-general)",
                   flex: "0 0 auto",
                 }} />
-                <b style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</b>
+                <b style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{prettifyAgentName(s.name)}</b>
                 {s.model && <span style={{ color: "var(--text-dim)", fontSize: 10 }}>· {s.model.split("-").slice(1, 3).join("-")}</span>}
               </div>
               <span title="dispatches" style={{ textAlign: "right" }}>
