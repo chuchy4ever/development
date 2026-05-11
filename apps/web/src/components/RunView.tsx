@@ -110,6 +110,9 @@ export function RunView({ runId, onClose }: Props) {
   const diffs = useMemo(() => events.filter((e) => e.type === "diff"), [events]);
   const [actionBusy, setActionBusy] = useState(false);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
+  /** Clicking a TeamFlowHeader pill filters LogView to only events from that
+   *  Director turn. Null = no filter. */
+  const [selectedIter, setSelectedIter] = useState<number | null>(null);
 
   async function handleCancel() {
     if (!confirm(t("run.confirm_cancel"))) return;
@@ -322,7 +325,13 @@ export function RunView({ runId, onClose }: Props) {
           <VerdictBar run={run} busy={actionBusy} onSet={handleSetVerdict} />
         )}
 
-        {events.length > 0 && <TeamFlowHeader events={events} />}
+        {events.length > 0 && (
+          <TeamFlowHeader
+            events={events}
+            selectedIter={selectedIter}
+            onSelectIter={(it) => setSelectedIter((cur) => (cur === it ? null : it))}
+          />
+        )}
         {events.length > 0 && <AgentBreakdown events={events} />}
 
         <div className="tabs" role="tablist" style={{ marginTop: 12, paddingLeft: 0 }}>
@@ -364,7 +373,7 @@ export function RunView({ runId, onClose }: Props) {
 
         <div style={{ flex: 1, overflow: "auto", padding: "12px 0", minHeight: 0 }}>
           {activeTab === "log" ? (
-            <LogView events={events} />
+            <LogView events={events} selectedIter={selectedIter} onClearIter={() => setSelectedIter(null)} />
           ) : (
             <DiffView diffs={diffs} />
           )}
@@ -375,7 +384,15 @@ export function RunView({ runId, onClose }: Props) {
   );
 }
 
-function LogView({ events }: { events: UiEvent[] }) {
+function LogView({
+  events,
+  selectedIter,
+  onClearIter,
+}: {
+  events: UiEvent[];
+  selectedIter: number | null;
+  onClearIter: () => void;
+}) {
   const [filters, setFilters] = useState<Record<FilterKey, boolean>>({
     director: true,
     tools: false,    // claude_stream is noisy by default
@@ -384,21 +401,40 @@ function LogView({ events }: { events: UiEvent[] }) {
     errors: true,
     diffs: true,
   });
-  // Count by category for chip badges
+  // Pre-compute iteration boundaries: each director_decision starts a turn,
+  // events between this decision (inclusive) and the next director_decision
+  // (exclusive) belong to that turn. The very first events (before any
+  // director_decision — run setup) belong to "turn 0".
+  const iterByIndex = useMemo(() => {
+    const map: number[] = new Array(events.length);
+    let current = 0;
+    for (let i = 0; i < events.length; i++) {
+      const e = events[i]!;
+      if (e.type === "director_decision") {
+        const it = (e.payload as { iteration?: number } | undefined)?.iteration;
+        if (typeof it === "number") current = it;
+      }
+      map[i] = current;
+    }
+    return map;
+  }, [events]);
+  // Count by category for chip badges — narrowed to selected iteration if any.
   const counts = useMemo(() => {
     const c: Record<FilterKey, number> = { director: 0, tools: 0, phases: 0, system: 0, errors: 0, diffs: 0 };
-    for (const e of events) {
-      const k = classifyEvent(e.type);
+    for (let i = 0; i < events.length; i++) {
+      if (selectedIter !== null && iterByIndex[i] !== selectedIter) continue;
+      const k = classifyEvent(events[i]!.type);
       if (k) c[k]++;
     }
     return c;
-  }, [events]);
+  }, [events, iterByIndex, selectedIter]);
   const filtered = useMemo(
-    () => events.filter((e) => {
+    () => events.filter((e, i) => {
+      if (selectedIter !== null && iterByIndex[i] !== selectedIter) return false;
       const k = classifyEvent(e.type);
       return k ? filters[k] : true;
     }),
-    [events, filters],
+    [events, iterByIndex, selectedIter, filters],
   );
   return (
     <div style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}>
@@ -410,6 +446,21 @@ function LogView({ events }: { events: UiEvent[] }) {
         borderBottom: "1px solid var(--border)",
         marginBottom: 6,
       }}>
+        {selectedIter !== null && (
+          <button
+            type="button"
+            onClick={onClearIter}
+            title="Zrušit filtr na turn"
+            style={{
+              fontSize: 11, padding: "3px 10px", borderRadius: 12,
+              background: "var(--accent)", color: "#fff",
+              border: "1px solid var(--accent)",
+              fontWeight: 600,
+            }}
+          >
+            ✕ T{selectedIter}
+          </button>
+        )}
         {(["director","tools","phases","system","errors","diffs"] as FilterKey[]).map((k) => (
           <button
             key={k}
@@ -593,7 +644,15 @@ type FlowStep = {
   inProgress: boolean;
 };
 
-function TeamFlowHeader({ events }: { events: UiEvent[] }) {
+function TeamFlowHeader({
+  events,
+  selectedIter,
+  onSelectIter,
+}: {
+  events: UiEvent[];
+  selectedIter: number | null;
+  onSelectIter: (iter: number) => void;
+}) {
   const steps = useMemo(() => {
     const list: FlowStep[] = [];
     let lastIter = 0;
@@ -657,25 +716,34 @@ function TeamFlowHeader({ events }: { events: UiEvent[] }) {
       {steps.map((s, i) => {
         const c = colorFor(s);
         const okBadge = s.ok === true ? "✓" : s.ok === false ? "✗" : s.inProgress ? "⏳" : "";
+        const isSelected = selectedIter === s.iter;
         return (
           <span key={i} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <span style={{
-              fontSize: 11,
-              padding: "3px 8px", borderRadius: 12,
-              background: s.inProgress
-                ? `color-mix(in srgb, ${c} 20%, transparent)`
-                : `color-mix(in srgb, ${c} 13%, transparent)`,
-              border: `1px solid ${c}`,
-              color: c,
-              fontWeight: 600,
-              animation: s.inProgress ? "pulse 1.6s ease-in-out infinite" : undefined,
-            }}>
-              <span style={{ opacity: 0.6, marginRight: 4 }}>T{s.iter}</span>
+            <button
+              type="button"
+              onClick={() => onSelectIter(s.iter)}
+              title={isSelected ? "Klikni znovu pro zobrazení všech turnů" : `Zobrazit jen log z turnu T${s.iter}`}
+              style={{
+                fontSize: 11,
+                padding: "3px 8px", borderRadius: 12,
+                background: isSelected
+                  ? c
+                  : (s.inProgress
+                    ? `color-mix(in srgb, ${c} 20%, transparent)`
+                    : `color-mix(in srgb, ${c} 13%, transparent)`),
+                border: `1px solid ${c}`,
+                color: isSelected ? "#fff" : c,
+                fontWeight: 600,
+                cursor: "pointer",
+                animation: s.inProgress ? "pulse 1.6s ease-in-out infinite" : undefined,
+              }}
+            >
+              <span style={{ opacity: 0.7, marginRight: 4 }}>T{s.iter}</span>
               {s.label}
               {okBadge && <span style={{ marginLeft: 4 }}>{okBadge}</span>}
-              {s.cost > 0 && <span style={{ opacity: 0.7, marginLeft: 4, fontWeight: 400 }}>${s.cost.toFixed(2)}</span>}
-              {s.duration_ms > 0 && <span style={{ opacity: 0.55, marginLeft: 4, fontWeight: 400 }}>· {fmtDuration(s.duration_ms)}</span>}
-            </span>
+              {s.cost > 0 && <span style={{ opacity: 0.8, marginLeft: 4, fontWeight: 400 }}>${s.cost.toFixed(2)}</span>}
+              {s.duration_ms > 0 && <span style={{ opacity: 0.65, marginLeft: 4, fontWeight: 400 }}>· {fmtDuration(s.duration_ms)}</span>}
+            </button>
             {i < steps.length - 1 && <span style={{ color: "var(--text-dim)" }}>→</span>}
           </span>
         );

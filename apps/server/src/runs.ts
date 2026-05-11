@@ -826,7 +826,16 @@ Rules:
     // the run succeeded. Fast-forward only and only if the parent has no
     // uncommitted changes — never overwrite user state. The user sees results
     // in their IDE without a manual git fetch step.
-    if (finalStatus === "succeeded") {
+    //
+    // Skip this entirely when the workflow has a git_push gate — that gate
+    // already merged worktree → base (squash or ff) and pushed to origin.
+    // The local base_branch now diverges from worktree HEAD (squash commit
+    // vs raw worktree commits) so ff-only would always fail with a confusing
+    // "history diverged" message. The work IS landed.
+    const hasGitPushGate = project.workflow.phases.some(
+      (p) => p.kind === "task" && p.task?.type === "git_push",
+    );
+    if (finalStatus === "succeeded" && !hasGitPushGate) {
       for (const wt of worktrees) {
         try {
           const result = await tryFastForwardParent(wt.path, wt.repo_path, wt.base_branch);
