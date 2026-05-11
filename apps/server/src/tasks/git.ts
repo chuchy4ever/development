@@ -224,7 +224,7 @@ async function ffMergeAndPush(args: FfMergeArgs): Promise<{ code: number; stdout
     return { code: 1, stdout: "", stderr: `git_push: no ceo branch ending in -${args.runId} in ${args.parentPath}` };
   }
 
-  // Ensure parent is on base_branch (refuse if dirty — never overwrite user state).
+  // Refuse if dirty — never overwrite user state.
   const status = await gitRun(["status", "--porcelain"], args.parentPath, args.signal);
   if (status.code !== 0) return status;
   if (status.stdout.trim()) {
@@ -236,7 +236,23 @@ async function ffMergeAndPush(args: FfMergeArgs): Promise<{ code: number; stdout
     if (co.code !== 0) return co;
   }
 
-  // ff-only merge worktree branch in. "Already up-to-date" is exit 0.
+  // Align local base with origin first (parallel runs may have already pushed).
+  const fetch = await gitRun(["fetch", args.remote, args.baseBranch], args.parentPath, args.signal);
+  if (fetch.code !== 0) return fetch;
+  const remoteRef = `${args.remote}/${args.baseBranch}`;
+  const reset = await gitRun(["reset", "--hard", remoteRef], args.parentPath, args.signal);
+  if (reset.code !== 0) return reset;
+
+  // If worktree branch is already in origin, nothing to do.
+  const ancestorCheck = await gitRun(["merge-base", "--is-ancestor", branchRef, remoteRef], args.parentPath, args.signal);
+  if (ancestorCheck.code === 0) {
+    return { code: 0, stdout: `worktree branch ${branchRef} already merged into ${remoteRef} — nothing to push`, stderr: "" };
+  }
+
+  // ff-only merge worktree branch in. Fails if worktree branched from an
+  // older base than origin's current tip (history diverged). The squash
+  // strategy handles that case; ff_only mode insists on a clean linear
+  // history, which is the trade-off.
   const merge = await gitRun(["merge", "--ff-only", branchRef], args.parentPath, args.signal);
   if (merge.code !== 0) return merge;
 
@@ -265,44 +281,54 @@ async function squashAndPush(args: SquashArgs): Promise<{ code: number; stdout: 
     return { code: 1, stdout: "", stderr: `squash: no ceo branch ending in -${args.runId} in ${args.parentPath}` };
   }
 
-  // 1. Make sure we're on baseBranch in the parent.
-  const head = await gitRun(["rev-parse", "--abbrev-ref", "HEAD"], args.parentPath, args.signal);
-  if (head.stdout.trim() !== args.baseBranch) {
+  // 1. Refuse if parent repo has uncommitted/staged work — never overwrite user state.
+  const status = await gitRun(["status", "--porcelain"], args.parentPath, args.signal);
+  if (status.code !== 0) return status;
+  if (status.stdout.trim()) {
+    return { code: 1, stdout: "", stderr: `squash: parent ${args.parentPath} has uncommitted changes — refusing` };
+  }
+
+  // 2. Make sure we're on baseBranch.
+  const headBranch = await gitRun(["rev-parse", "--abbrev-ref", "HEAD"], args.parentPath, args.signal);
+  if (headBranch.stdout.trim() !== args.baseBranch) {
     const co = await gitRun(["checkout", args.baseBranch], args.parentPath, args.signal);
     if (co.code !== 0) return co;
   }
 
-  // 2. Find merge-base of baseBranch and the worktree branch — the point from
-  //    which the run's work diverged. Reset baseBranch back there if base has
-  //    advanced past it (i.e. the engine's FF auto-merge already moved base
-  //    forward); otherwise leave base where it is.
-  const mb = await gitRun(["merge-base", "HEAD", branchRef], args.parentPath, args.signal);
-  if (mb.code !== 0) return mb;
-  const baseSha = mb.stdout.trim();
-  if (!baseSha) return { code: 1, stdout: "", stderr: "merge-base returned empty" };
+  // 3. Fetch + align local base with origin tip BEFORE we squash anything.
+  //    Critical: another run (parallel or earlier-finished) may have already
+  //    pushed work after this run started. Reset-to-merge-base (old behavior)
+  //    would lose those commits and the subsequent push would be rejected
+  //    non-ff. By matching origin first, the squash builds on top of the
+  //    latest state and the push always fast-forwards.
+  const fetch = await gitRun(["fetch", args.remote, args.baseBranch], args.parentPath, args.signal);
+  if (fetch.code !== 0) return fetch;
+  const remoteRef = `${args.remote}/${args.baseBranch}`;
+  const reset = await gitRun(["reset", "--hard", remoteRef], args.parentPath, args.signal);
+  if (reset.code !== 0) return reset;
 
-  // 3. Reset base back to merge-base ONLY if HEAD has advanced past it (post-
-  //    auto-merge case). When HEAD === merge-base (the typical gate-mode case
-  //    where git_push runs before the engine's auto-merge), we're already at
-  //    the right place; skipping the reset avoids a pointless --hard.
-  const headSha = await gitRun(["rev-parse", "HEAD"], args.parentPath, args.signal);
-  if (headSha.stdout.trim() !== baseSha) {
-    const reset = await gitRun(["reset", "--hard", baseSha], args.parentPath, args.signal);
-    if (reset.code !== 0) return reset;
+  // 4. If the worktree branch's HEAD is already an ancestor of origin's tip,
+  //    everything in the worktree is already merged remotely (e.g. an earlier
+  //    sibling run squash-merged it). Nothing to do — no-op success.
+  const ancestorCheck = await gitRun(["merge-base", "--is-ancestor", branchRef, remoteRef], args.parentPath, args.signal);
+  if (ancestorCheck.code === 0) {
+    return { code: 0, stdout: `worktree branch ${branchRef} already merged into ${remoteRef} — nothing to push`, stderr: "" };
   }
 
-  // 4. Squash-merge the worktree branch.
+  // 5. Squash-merge the worktree branch on top of (now-current) base.
   const sq = await gitRun(["merge", "--squash", branchRef], args.parentPath, args.signal);
   if (sq.code !== 0) return sq;
-  // Squash on an already-merged or empty branch produces no diff → commit
-  // would fail with "nothing to commit". Authoritative emptiness check.
+  // If diff is empty post-squash, every file change on the worktree branch
+  // is already present in origin (e.g. via a different path / earlier run).
+  // Treat as no-op success.
   const diff = await gitRun(["diff", "--cached", "--quiet"], args.parentPath, args.signal);
   if (diff.code === 0) {
-    return { code: 0, stdout: "squash produced no changes (already merged)", stderr: "" };
+    return { code: 0, stdout: "squash produced no changes (worktree diff already in remote)", stderr: "" };
   }
   const commit = await gitRun(["commit", "-m", args.commitMessage], args.parentPath, args.signal);
   if (commit.code !== 0) return commit;
 
-  // 5. Push.
+  // 6. Push. Should always fast-forward now because step 3 aligned with origin
+  //    and step 5 only added a single new commit on top.
   return gitRun(["push", args.remote, args.baseBranch], args.parentPath, args.signal);
 }
