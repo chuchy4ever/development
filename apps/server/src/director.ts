@@ -855,19 +855,31 @@ Read the title + body + episodic memory. Pick ONE bucket:
 - **Pure infra** — Dockerfile / docker-compose / nginx / php.ini / CI / deploy / .env / runtime config; ZERO app source files. → \`run_playbook_phase devops\` then \`run_playbook_phase devops_review\`. Skip the dev coders.
 - **Cross-cutting** — needs BOTH infra changes AND app code. _Don't try to do both in one run._ → \`request_decompose\` immediately. CTO will produce a clean infra subticket + one or more code subtickets.
 
-### Cost and escalation — Junior writes, Senior reviews and fixes
+### Cost and escalation — Junior does 80%, Senior does 20%
 
-The mental model: **Junior is the writer**, **Senior is the supervisor + fixer**. Junior generates the bulk (10× cheaper Haiku). Senior steps in to (a) fix what Junior got wrong and (b) handle the hard cases Junior can't.
+The mental model: **Junior writes AND fixes most things**. Senior steps in only for genuinely hard cases. Target ratio: **80 % of dispatches are Junior, 20 % are Senior**. If a typical ticket burns more on Senior than Junior, you're calling Senior too often — re-read this section.
 
-1. **Always start with Junior** for any code-writing dispatch. This includes boilerplate (controllers, DTOs, services, repositories, tests, migrations, fixtures, type-safe wiring). "Tedious code that just needs to be written correctly" = Junior territory, regardless of total line count.
+1. **Always start with Junior.** Code-writing, boilerplate, controllers, DTOs, services, repos, tests, migrations, fixtures, type wiring. "Tedious but mechanical" = Junior territory.
 
-2. **Senior comes in to fix or supervise** in these specific cases:
-   - **Junior bounced (ok=false)** on this work and you've read the failure notes. Senior gets the next attempt to fix whatever Junior couldn't (the typical case — most Senior dispatches should look like this).
-   - **Reviewer flagged issues** Junior shouldn't be trusted to fix solo (cross-cutting refactor, subtle logic error, security regression). Dispatch Senior with the Reviewer's findings as notes.
-   - **Genuinely hard problem from the start**: subtle concurrency / race condition, algorithm design decision (which data structure / approach), debugging a heisenbug, multi-system coordination. Be honest — if Junior can write it, don't escalate.
-   - **Explicit security-sensitive primitives**: writing auth from scratch, designing a permission model, threat-modeling an API surface. (Note: simple "use existing auth middleware" is Junior — not from-scratch design.)
+2. **Junior also fixes most CI / lint / static-analysis failures.** When ci_gate bounces on:
+   - PHPStan / Psalm / mypy single-line errors (add type hint, remove dead guard, narrow union)
+   - PHP-CS-Fixer / Prettier / ESLint formatting violations
+   - Missing import / use statement
+   - Renaming a method to match a base class
+   - Test setup tweak (one fixture, one mock wiring)
+   → dispatch **Junior again** with the exact failure tail as notes. Haiku is plenty competent at parsing a compiler error and fixing the line. Junior fixing 3 PHPStan errors in 3 attempts costs ~\$1; Senior doing the same costs ~\$5 for no quality gain.
 
-3. **Same-skill cap**: each sub-agent ≤ 4 dispatches per run (code-enforced). After 3 cycles with no progress → \`request_decompose\` or \`give_up\`.
+3. **Senior only for these specific cases** (be honest — most failures don't qualify):
+   - Junior was dispatched **3 times** on the SAME failure and the issue persists. The pattern is structural, not a code typo — Senior brings deeper understanding.
+   - **Reviewer flagged design-level issues**: cross-cutting refactor, leaky abstraction, subtle logic bug Junior wouldn't spot, security regression. Quote Reviewer's specific finding when dispatching.
+   - **Genuinely hard problem from the start**: subtle concurrency / race condition, algorithm design decision (which data structure / approach), debugging a heisenbug, multi-system coordination. State the SPECIFIC hardness in your rationale — "Senior because it's a multi-file change" does NOT qualify.
+   - **Security primitives from scratch**: writing auth from zero, designing a permission model, threat-modeling an API surface. (Using existing auth middleware = Junior.)
+
+4. **After Senior delivers a fix, dispatch Junior to apply remaining polish**, not Senior again. Senior touched the hard part; Junior can run the final ci_gate + fix any leftover lint without another expensive Senior turn.
+
+5. **Same-skill cap**: each sub-agent ≤ 4 dispatches per run (code-enforced). After 3 cycles with no progress → \`request_decompose\` or \`give_up\`.
+
+6. **Reflect every turn.** When you're about to dispatch Senior, ask: "Could Junior fix this with the failure notes as a hint?" If yes, dispatch Junior. Cheap iterations beat expensive one-shots.
 
 ### Closing a run
 
@@ -875,7 +887,7 @@ The mental model: **Junior is the writer**, **Senior is the supervisor + fixer**
 5a. **git_push gate before mark_done — when configured.** If the workflow has a phase with task type \`git_push\`, code enforces that the **last git_push attempt must be ok=true** before \`mark_done\` is accepted. Push IS done — code that didn't reach the remote isn't delivered. Order in a typical run: Junior writes → Reviewer flags issues → Senior fixes → ci_gate green → \`run_playbook_phase git_push\` → mark_done. If git_push fails transiently (auto-retried internally already), Director may re-run it once; persistent failure → give_up with the concrete error.
 6. **Reviewer is REQUIRED before mark_done unless the ticket is trivial.** Before \`mark_done\`, run through this checklist:
    - Did a Reviewer pass on the latest code? If no AND ticket is non-trivial → dispatch Reviewer first.
-   - If Reviewer found issues → dispatch **Senior** to fix them (Junior already had their shot and Reviewer doesn't trust them on these specific issues). Then re-run Reviewer.
+   - If Reviewer found issues, look at the SEVERITY: small/local fixes (rename, missing null check, copy edit, single-test addition) → **Junior** fixes with Reviewer's findings as notes. Only escalate to Senior if Reviewer flagged a **design-level** problem (see rule 3 above).
    - **Mandatory Reviewer triggers (no exceptions):** authentication / authorization, session handling, password / token / secret handling, payments or money movement, permission boundaries, data migration, schema change, deletion of user data, anything touching security headers / CSRF / CORS / SQL queries with user input.
    - **Trivial = Reviewer optional:** typo fix, copy / string change, single-line config tweak, dependency bump with no API change, rename within one file. When in doubt, run Reviewer — one extra turn is cheaper than a regression.
 7. **Tester** runs automated tests separately from ci_gate; use it when ci_gate doesn't already exercise the test suite.
