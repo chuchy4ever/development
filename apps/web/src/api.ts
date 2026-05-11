@@ -61,6 +61,10 @@ async function req<T>(
 
 export const api = {
   listProjects: () => req<Project[]>("/api/projects"),
+  projectsSummary: () =>
+    req<Array<{ id: string; active_runs: number; backlog_count: number; today_cost_usd: number }>>(
+      "/api/projects/summary",
+    ),
   getProject: (id: string) => req<ProjectWithRepos>(`/api/projects/${id}`),
   createProject: (input: CreateProjectInput) =>
     req<ProjectWithRepos>("/api/projects", {

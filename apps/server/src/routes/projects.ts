@@ -25,6 +25,23 @@ projectsRouter.get("/", (_req, res) => {
   res.json(listProjects());
 });
 
+/** Per-project activity summary for the sidebar — running runs, backlog
+ *  depth, today's cost. One round-trip instead of N. */
+projectsRouter.get("/summary", (_req, res) => {
+  const rows = db.prepare(`
+    SELECT
+      p.id AS id,
+      (SELECT COUNT(*) FROM runs r
+        WHERE r.project_id = p.id AND r.status IN ('running','pending','awaiting_approval')) AS active_runs,
+      (SELECT COUNT(*) FROM tickets t
+        WHERE t.project_id = p.id AND t.status = 'backlog') AS backlog_count,
+      (SELECT COALESCE(SUM(total_cost_usd), 0) FROM runs r
+        WHERE r.project_id = p.id AND date(r.created_at) = date('now')) AS today_cost_usd
+    FROM projects p
+  `).all() as Array<{ id: string; active_runs: number; backlog_count: number; today_cost_usd: number }>;
+  res.json(rows);
+});
+
 projectsRouter.post("/", (req, res) => {
   const input = req.body as CreateProjectInput;
   if (!input?.name?.trim()) {
