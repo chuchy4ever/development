@@ -217,6 +217,8 @@ export const cs: Record<string, string> = {
   "confirm.delete_team": "Smazat tým „{name}\"?",
 
   // Run view tabs
+  "run.tab.overview": "📊 Přehled",
+  "run.tab.overview_empty": "Žádné eventy zatím. Až Director začne, uvidíš tady průběh + rozpad agentů.",
   "run.tab.director": "🎬 Director ({count})",
   "run.tab.log": "📜 Log ({count})",
 

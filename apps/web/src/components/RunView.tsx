@@ -40,7 +40,7 @@ export function RunView({ runId, onClose }: Props) {
   useLang();
   const [run, setRun] = useState<Run | null>(null);
   const [events, setEvents] = useState<UiEvent[]>([]);
-  const [activeTab, setActiveTab] = useState<"director" | "log" | "diff">("director");
+  const [activeTab, setActiveTab] = useState<"overview" | "director" | "log" | "diff">("overview");
   const logEnd = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -323,15 +323,6 @@ export function RunView({ runId, onClose }: Props) {
           <VerdictBar run={run} busy={actionBusy} onSet={handleSetVerdict} />
         )}
 
-        {events.length > 0 && (
-          <TeamFlowHeader
-            events={events}
-            selectedIter={selectedIter}
-            onSelectIter={(it) => setSelectedIter((cur) => (cur === it ? null : it))}
-          />
-        )}
-        {events.length > 0 && <AgentBreakdown events={events} />}
-
         {(() => {
           // Pre-filter events per tab so each tab is a focused view instead of
           // hiding 6 chip filters behind one mega log. Director tab = the
@@ -346,6 +337,14 @@ export function RunView({ runId, onClose }: Props) {
           return (
             <>
               <div className="tabs" role="tablist" style={{ marginTop: 12, paddingLeft: 0 }}>
+                <button
+                  role="tab"
+                  aria-selected={activeTab === "overview"}
+                  className={`tab tab-button ${activeTab === "overview" ? "active" : ""}`}
+                  onClick={() => setActiveTab("overview")}
+                >
+                  {t("run.tab.overview")}
+                </button>
                 <button
                   role="tab"
                   aria-selected={activeTab === "director"}
@@ -371,7 +370,7 @@ export function RunView({ runId, onClose }: Props) {
                   {t("run.diff", { count: diffs.length })}
                 </button>
                 <div style={{ flex: 1 }} />
-                {(activeTab === "director" || activeTab === "log") && events.length > 0 && (
+                {(activeTab === "director" || activeTab === "log" || activeTab === "overview") && events.length > 0 && (
                   <button
                     onClick={() => {
                       const blob = new Blob([JSON.stringify(events, null, 2)], { type: "application/json" });
@@ -391,6 +390,21 @@ export function RunView({ runId, onClose }: Props) {
               </div>
 
               <div style={{ flex: 1, overflow: "auto", padding: "12px 0", minHeight: 0 }}>
+                {activeTab === "overview" && events.length > 0 && (
+                  <>
+                    <TeamFlowHeader
+                      events={events}
+                      selectedIter={selectedIter}
+                      onSelectIter={(it) => setSelectedIter((cur) => (cur === it ? null : it))}
+                    />
+                    <AgentBreakdown events={events} />
+                  </>
+                )}
+                {activeTab === "overview" && events.length === 0 && (
+                  <div style={{ color: "var(--text-dim)", padding: 16, fontSize: 12 }}>
+                    {t("run.tab.overview_empty")}
+                  </div>
+                )}
                 {activeTab === "director" && (
                   <LogView
                     events={directorEvents}

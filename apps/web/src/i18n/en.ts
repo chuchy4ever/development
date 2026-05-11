@@ -217,6 +217,8 @@ export const en: Record<string, string> = {
   "confirm.delete_team": "Delete team \"{name}\"?",
 
   // Run view tabs
+  "run.tab.overview": "📊 Overview",
+  "run.tab.overview_empty": "No events yet. Once Director starts you'll see the turn-by-turn flow and per-agent breakdown here.",
   "run.tab.director": "🎬 Director ({count})",
   "run.tab.log": "📜 Log ({count})",
 
