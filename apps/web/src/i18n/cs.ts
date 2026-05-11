@@ -215,4 +215,59 @@ export const cs: Record<string, string> = {
   "confirm.reset_playbook": "Resetovat playbook na výchozí (jeden skill na roli)?",
   "confirm.apply_template": "Použít tuto šablonu? PŘEPÍŠE aktuální playbook a přidá chybějící agenty (existující zůstanou).",
   "confirm.delete_team": "Smazat tým „{name}\"?",
+
+  // Bulk import
+  "bulk.spec_intro": "Máš volný spec (zadani.md, brain dump…)? Klikni a CTO ti ho rozdělí na tickety v správném formátu — pak si je nahoře zreviewuješ a importneš.",
+  "bulk.spec_btn": "↻ Rozložit spec na tickety",
+  "bulk.spec_busy": "Rozkládám…",
+
+  // Connector health / age
+  "age.just_now": "právě teď",
+  "age.minutes": "před {n} min",
+  "age.hours": "před {n} h",
+  "age.days": "před {n} d",
+
+  // Workflow editor — preset picker + panels + shell wizard
+  "wf.preset.btn": "📦 Použít preset",
+  "wf.preset.btn_title_gate": "Vyber z hotové sady CI / lint / approval / git_push presetů",
+  "wf.preset.btn_title_connector": "Vyber z hotové sady connectorů",
+  "wf.preset.modal_title": "📦 Vyber preset",
+  "wf.preset.modal_hint": "Hotové konfigurace pro běžné případy. Po importu si je můžeš upravit per-projekt — žádné live napojení na knihovnu, žádná synchronizace zpět.",
+  "wf.preset.empty": "(žádné presety pro tuhle sekci)",
+  "wf.preset.close": "Zavřít",
+  "wf.preset.cat.ci": "CI & lint gates",
+  "wf.preset.cat.git": "Git push",
+  "wf.preset.cat.approval": "Human approval",
+  "wf.preset.cat.deploy": "Deploy & ops",
+  "wf.connectors.add": "+ Přidat konektor",
+  "wf.connectors.empty": "Žádný konektor. Použij preset, nebo přidej Jira / GitHub / SSH abys reportoval výsledek runu navenek.",
+  "wf.shell.wizard_close": "✕ Zrušit wizard, napsat příkaz ručně",
+  "wf.shell.wizard_open": "📋 Použít wizard pro Make / npm / Docker / Composer",
+  "wf.git_push.intro": "Po dokončení runu pushne base branch každého repa projektu na zadaný remote. Pracuje pro GitLab i GitHub — používá git CLI nad existující remote konfigurací, žádné platform-specific API. Engine se postará o lokální merge worktree → base; tato akce jen pushne ven (případně přepíše merge na jeden squash commit).",
+  "wf.git_push.remote": "remote",
+  "wf.git_push.when": "push when",
+  "wf.git_push.when.success": "only on success (recommended)",
+  "wf.git_push.when.always": "always (even on failure — push partial work)",
+  "wf.git_push.when.failure": "only on failure (rare)",
+  "wf.git_push.strategy": "strategy",
+  "wf.git_push.strategy.ff": "ff-only (zachová všechny sub-agent commits)",
+  "wf.git_push.strategy.squash": "squash (jeden commit s vlastní message)",
+  "wf.git_push.strategy_hint": "ff-only: ponechá 10+ drobných commitů od Junior/Senior. squash: všechno do jednoho commitu se zprávou níže — čistší git log.",
+  "wf.git_push.template": "commit message template",
+  "wf.git_push.template_placeholder": "implement {ticket_title}",
+  "wf.git_push.template_hint": "Placeholders: {placeholders}",
+
+  // Run verdict
+  "verdict.title": "Tvůj verdikt:",
+  "verdict.good": "✓ Funguje",
+  "verdict.bad": "✗ Špatně",
+  "verdict.broken_in_prod": "⚠ Rozbilo se v produkci",
+  "verdict.prompt_bad": "Co bylo špatně? (zobrazí se v episodic memory)",
+  "verdict.prompt_broken": "Co se rozbilo v produkci? (zobrazí se v episodic memory pro budoucí runy)",
+  "verdict.failed": "Verdikt selhal",
+
+  // Admin metrics
+  "metrics.verdicts.title": "Verdikty od uživatele",
+  "metrics.verdicts.unrated": "Bez verdiktu",
+  "metrics.verdicts.empty": "Žádné dokončené runy zatím.",
 };

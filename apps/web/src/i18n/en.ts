@@ -215,4 +215,59 @@ export const en: Record<string, string> = {
   "confirm.reset_playbook": "Reset playbook to default (one skill per agent role)?",
   "confirm.apply_template": "Apply this template? It will REPLACE the current playbook and add any missing agents (existing agents are kept).",
   "confirm.delete_team": "Delete team \"{name}\"?",
+
+  // Bulk import
+  "bulk.spec_intro": "Have a free-form spec (zadani.md, brain dump)? Click and a CTO-style agent will break it down into proper tickets — review the result above and import.",
+  "bulk.spec_btn": "↻ Break spec into tickets",
+  "bulk.spec_busy": "Decomposing…",
+
+  // Connector health / age
+  "age.just_now": "just now",
+  "age.minutes": "{n} min ago",
+  "age.hours": "{n}h ago",
+  "age.days": "{n}d ago",
+
+  // Workflow editor — preset picker + panels + shell wizard
+  "wf.preset.btn": "📦 Use a preset",
+  "wf.preset.btn_title_gate": "Pick from built-in CI / lint / approval / git_push presets",
+  "wf.preset.btn_title_connector": "Pick from built-in connectors",
+  "wf.preset.modal_title": "📦 Pick a preset",
+  "wf.preset.modal_hint": "Built-in configurations for common cases. Copied into the workflow on import — edit per-project, no live link back to the library.",
+  "wf.preset.empty": "(no presets for this section)",
+  "wf.preset.close": "Close",
+  "wf.preset.cat.ci": "CI & lint gates",
+  "wf.preset.cat.git": "Git push",
+  "wf.preset.cat.approval": "Human approval",
+  "wf.preset.cat.deploy": "Deploy & ops",
+  "wf.connectors.add": "+ Add connector",
+  "wf.connectors.empty": "No connectors. Use a preset or add Jira / GitHub / SSH to report run outcomes externally.",
+  "wf.shell.wizard_close": "✕ Close wizard, write command manually",
+  "wf.shell.wizard_open": "📋 Use wizard for Make / npm / Docker / Composer",
+  "wf.git_push.intro": "After the run completes, pushes each repo's base branch to the configured remote. Works for GitLab and GitHub — pure git CLI over your existing remote config, no platform-specific API. The engine handles the local merge worktree → base; this action just pushes (or rewrites the merge as one squash commit).",
+  "wf.git_push.remote": "remote",
+  "wf.git_push.when": "push when",
+  "wf.git_push.when.success": "only on success (recommended)",
+  "wf.git_push.when.always": "always (even on failure — push partial work)",
+  "wf.git_push.when.failure": "only on failure (rare)",
+  "wf.git_push.strategy": "strategy",
+  "wf.git_push.strategy.ff": "ff-only (preserve every sub-agent commit)",
+  "wf.git_push.strategy.squash": "squash (one commit with custom message)",
+  "wf.git_push.strategy_hint": "ff-only: keeps 10+ small commits from Junior/Senior. squash: collapses everything into one commit using the template below — cleaner git log.",
+  "wf.git_push.template": "commit message template",
+  "wf.git_push.template_placeholder": "implement {ticket_title}",
+  "wf.git_push.template_hint": "Placeholders: {placeholders}",
+
+  // Run verdict
+  "verdict.title": "Your verdict:",
+  "verdict.good": "✓ Works",
+  "verdict.bad": "✗ Bad",
+  "verdict.broken_in_prod": "⚠ Broke in production",
+  "verdict.prompt_bad": "What went wrong? (shown in episodic memory)",
+  "verdict.prompt_broken": "What broke in production? (shown in episodic memory for future runs)",
+  "verdict.failed": "Verdict failed",
+
+  // Admin metrics
+  "metrics.verdicts.title": "User verdicts",
+  "metrics.verdicts.unrated": "Unrated",
+  "metrics.verdicts.empty": "No completed runs yet.",
 };

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { AgentTemplate, Project, WorkflowPreset } from "@ceo/shared";
 import { api } from "../api";
+import { t } from "../i18n";
 import type { AdminSection, Route } from "../router";
 import { JobsAdmin } from "./JobsAdmin";
 import { ConnectorSecretsPanel } from "./ConnectorSecretsPanel";
@@ -727,11 +728,11 @@ function Activity({ onTicketClick }: { onTicketClick: (projectId: string, ticket
               )}
             </div>
             <div className="settings-section" style={{ marginBottom: 0 }}>
-              <h4 style={{ marginTop: 0, marginBottom: 8, fontSize: 13 }}>User verdicts</h4>
+              <h4 style={{ marginTop: 0, marginBottom: 8, fontSize: 13 }}>{t("metrics.verdicts.title")}</h4>
               {(() => {
                 const v = metrics.verdict_stats;
                 const total = v.good + v.bad + v.broken_in_prod + v.unrated;
-                if (total === 0) return <div style={{ color: "var(--text-dim)", fontSize: 12 }}>No completed runs yet.</div>;
+                if (total === 0) return <div style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("metrics.verdicts.empty")}</div>;
                 const Row = ({ label, n, color }: { label: string; n: number; color: string }) => (
                   <tr style={{ borderBottom: "1px solid var(--border)" }}>
                     <td style={{ padding: "4px 0" }}>{label}</td>
@@ -744,10 +745,10 @@ function Activity({ onTicketClick }: { onTicketClick: (projectId: string, ticket
                 return (
                   <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
                     <tbody>
-                      <Row label="✓ Funguje" n={v.good} color="#047857" />
-                      <Row label="✗ Špatně" n={v.bad} color="#b91c1c" />
-                      <Row label="⚠ Rozbilo se v produkci" n={v.broken_in_prod} color="#7f1d1d" />
-                      <Row label="Bez verdiktu" n={v.unrated} color="var(--text-dim)" />
+                      <Row label={t("verdict.good")} n={v.good} color="#047857" />
+                      <Row label={t("verdict.bad")} n={v.bad} color="#b91c1c" />
+                      <Row label={t("verdict.broken_in_prod")} n={v.broken_in_prod} color="#7f1d1d" />
+                      <Row label={t("metrics.verdicts.unrated")} n={v.unrated} color="var(--text-dim)" />
                     </tbody>
                   </table>
                 );

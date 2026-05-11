@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { ProjectWithRepos } from "@ceo/shared";
 import { api } from "../api";
 import { useEscClose } from "../hooks";
+import { t } from "../i18n";
 
 interface Props {
   project: ProjectWithRepos;
@@ -80,7 +81,7 @@ export function BulkImportModal({ project, onClose, onCreated }: Props) {
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, padding: "8px 10px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 6 }}>
           <span style={{ fontSize: 11, color: "var(--text-dim)", flex: 1 }}>
-            Máš volný spec (zadani.md, brain dump…)? Klikni a CTO ti ho rozdělí na tickety v správném formátu — pak si je nahoře zreviewuješ a importneš.
+            {t("bulk.spec_intro")}
           </span>
           <button
             type="button"
@@ -88,7 +89,7 @@ export function BulkImportModal({ project, onClose, onCreated }: Props) {
             disabled={busy || extracting || !markdown.trim()}
             style={{ fontSize: 11, padding: "4px 10px" }}
           >
-            {extracting ? "Rozkládám…" : "↻ Rozložit spec na tickety"}
+            {extracting ? t("bulk.spec_busy") : t("bulk.spec_btn")}
           </button>
         </div>
         <label style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--text-dim)", fontSize: 12 }}>

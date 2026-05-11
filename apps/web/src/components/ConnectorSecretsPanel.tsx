@@ -11,6 +11,7 @@
 
 import { useEffect, useState } from "react";
 import { api, type ProjectSecretMasked } from "../api";
+import { t } from "../i18n";
 
 type Scope =
   | { scope: "project"; projectId: string }
@@ -198,10 +199,10 @@ function formatRelativeAge(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
   if (!Number.isFinite(ms) || ms < 0) return "";
   const m = Math.floor(ms / 60000);
-  if (m < 1) return "právě teď";
-  if (m < 60) return `před ${m} min`;
+  if (m < 1) return t("age.just_now");
+  if (m < 60) return t("age.minutes", { n: m });
   const h = Math.floor(m / 60);
-  if (h < 24) return `před ${h} h`;
+  if (h < 24) return t("age.hours", { n: h });
   const d = Math.floor(h / 24);
-  return `před ${d} d`;
+  return t("age.days", { n: d });
 }

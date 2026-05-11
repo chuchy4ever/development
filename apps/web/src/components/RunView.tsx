@@ -194,15 +194,13 @@ export function RunView({ runId, onClose }: Props) {
     try {
       let note: string | null = null;
       if (verdict === "bad" || verdict === "broken_in_prod") {
-        note = prompt(verdict === "broken_in_prod"
-          ? "Co se rozbilo v produkci? (zobrazí se v episodic memory pro budoucí runy)"
-          : "Co bylo špatně? (zobrazí se v episodic memory)") ?? "";
+        note = prompt(verdict === "broken_in_prod" ? t("verdict.prompt_broken") : t("verdict.prompt_bad")) ?? "";
         if (note === null) { setActionBusy(false); return; }
       }
       const r = await api.setRunVerdict(runId, verdict, note ?? undefined);
       setRun(r);
     } catch (e: any) {
-      setActionMsg(`Verdict failed: ${e.message}`);
+      setActionMsg(`${t("verdict.failed")}: ${e.message}`);
     } finally {
       setActionBusy(false);
     }
@@ -976,10 +974,10 @@ function VerdictBar({
       borderRadius: 6,
       fontSize: 12,
     }}>
-      <span style={{ color: "var(--text-dim)" }}>Tvůj verdikt:</span>
-      {btn("✓ Funguje", "good", "#16a34a")}
-      {btn("✗ Špatně", "bad", "#dc2626")}
-      {btn("⚠ Rozbilo se v produkci", "broken_in_prod", "#b91c1c")}
+      <span style={{ color: "var(--text-dim)" }}>{t("verdict.title")}</span>
+      {btn(t("verdict.good"), "good", "#16a34a")}
+      {btn(t("verdict.bad"), "bad", "#dc2626")}
+      {btn(t("verdict.broken_in_prod"), "broken_in_prod", "#b91c1c")}
       {run.user_verdict_note && (
         <span style={{ color: "var(--text-dim)", fontStyle: "italic", marginLeft: 8 }}>
           „{run.user_verdict_note.slice(0, 120)}{run.user_verdict_note.length > 120 ? "…" : ""}"

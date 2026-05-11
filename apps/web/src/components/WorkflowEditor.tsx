@@ -406,10 +406,10 @@ function TaskFormSection({ phase, onChangeType, onChangeConfig, connectorTab = "
       {type === "git_push" && (
         <>
           <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 10, padding: "8px 10px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 6 }}>
-            Po dokončení runu pushne base branch každého repa projektu na zadaný remote. Pracuje pro GitLab i GitHub — používá git CLI nad existující remote konfigurací, žádné platform-specific API. Engine se postará o lokální merge worktree → base; tato akce jen pushne ven (případně přepíše merge na jeden squash commit).
+            {t("wf.git_push.intro")}
           </div>
           <div className="form-row">
-            <label>remote</label>
+            <label>{t("wf.git_push.remote")}</label>
             <input
               value={String(config.remote ?? "origin")}
               onChange={(e) => setField("remote", e.target.value)}
@@ -418,40 +418,40 @@ function TaskFormSection({ phase, onChangeType, onChangeConfig, connectorTab = "
             />
           </div>
           <div className="form-row">
-            <label>push when</label>
+            <label>{t("wf.git_push.when")}</label>
             <select
               value={String(config.trigger ?? "success")}
               onChange={(e) => setField("trigger", e.target.value)}
             >
-              <option value="success">only on success (recommended)</option>
-              <option value="always">always (even on failure — push partial work)</option>
-              <option value="failure">only on failure (rare)</option>
+              <option value="success">{t("wf.git_push.when.success")}</option>
+              <option value="always">{t("wf.git_push.when.always")}</option>
+              <option value="failure">{t("wf.git_push.when.failure")}</option>
             </select>
           </div>
           <div className="form-row">
-            <label>strategy</label>
+            <label>{t("wf.git_push.strategy")}</label>
             <select
               value={String(config.strategy ?? "ff_only")}
               onChange={(e) => setField("strategy", e.target.value)}
             >
-              <option value="ff_only">ff-only (zachová všechny sub-agent commits)</option>
-              <option value="squash">squash (jeden commit s vlastní message)</option>
+              <option value="ff_only">{t("wf.git_push.strategy.ff")}</option>
+              <option value="squash">{t("wf.git_push.strategy.squash")}</option>
             </select>
             <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
-              <b>ff-only:</b> ponechá 10+ drobných commitů od Junior/Senior. <b>squash:</b> všechno do jednoho commitu se zprávou níže — čistší git log na development.
+              {t("wf.git_push.strategy_hint")}
             </div>
           </div>
           {String(config.strategy ?? "ff_only") === "squash" && (
             <div className="form-row">
-              <label>commit message template</label>
+              <label>{t("wf.git_push.template")}</label>
               <input
                 value={String(config.commit_message_template ?? "")}
                 onChange={(e) => setField("commit_message_template", e.target.value)}
-                placeholder="implement {ticket_title}"
+                placeholder={t("wf.git_push.template_placeholder")}
                 style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
               />
               <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
-                Placeholders: <code>{"{ticket_key} {ticket_title} {project_name} {run_id} {verdict_summary} {verdict_status}"}</code>
+                {t("wf.git_push.template_hint", { placeholders: "{ticket_key} {ticket_title} {project_name} {run_id} {verdict_summary} {verdict_status}" })}
               </div>
             </div>
           )}
@@ -662,12 +662,12 @@ function ShellPresetForm({ config, setField, openEditor, phaseId }: SubFormProps
             ))}
           </select>
           <button type="button" onClick={() => { setShowWizard(false); updatePreset("custom"); }} style={{ marginTop: 6, fontSize: 11, padding: "2px 8px", background: "transparent", border: "1px dashed var(--border)", color: "var(--text-dim)" }}>
-            ✕ Zrušit wizard, napsat příkaz ručně
+            {t("wf.shell.wizard_close")}
           </button>
         </div>
       ) : (
         <button type="button" onClick={() => setShowWizard(true)} style={{ marginBottom: 10, fontSize: 11, padding: "4px 10px", background: "transparent", border: "1px dashed var(--border)", color: "var(--text-dim)" }}>
-          📋 Použít wizard pro Make / npm / Docker / Composer
+          {t("wf.shell.wizard_open")}
         </button>
       )}
 
@@ -1362,8 +1362,8 @@ function GatesPanel({
       )}
       {gates.map((p) => <TaskPhaseRow key={p.id} phase={p} onSelect={onSelect} />)}
       <div style={{ display: "flex", gap: 6, marginTop: 10, position: "relative", flexWrap: "wrap" }}>
-        <button onClick={onImportPreset} className="primary" title="Vyber z hotové sady CI / lint / approval presetů">
-          📦 Použít preset
+        <button onClick={onImportPreset} className="primary" title={t("wf.preset.btn_title_gate")}>
+          {t("wf.preset.btn")}
         </button>
         <button onClick={() => setAddOpen((o) => !o)}>+ {t("btn.add_gate")}</button>
         {addOpen && (
@@ -1418,20 +1418,20 @@ function ConnectorsPanel({
       open={open}
       onToggle={() => setOpen((o) => !o)}
       title="Connectors"
-      summary={`${connectors.length} ${connectors.length === 1 ? "integrace" : "integrací"} (Jira, GitHub, SSH, Telegram, Git push)`}
+      summary={`${connectors.length} ${connectors.length === 1 ? "integrace" : "integrací"} (Jira, GitHub, SSH, Telegram)`}
       icon="🔌"
     >
       {connectors.length === 0 && (
         <div style={{ color: "var(--text-dim)", padding: "8px 0" }}>
-          Žádný konektor. Použij preset, nebo přidej Jira / GitHub / SSH / Git push abys reportoval výsledek runu navenek.
+          {t("wf.connectors.empty")}
         </div>
       )}
       {connectors.map((p) => <TaskPhaseRow key={p.id} phase={p} onSelect={onSelect} />)}
       <div style={{ display: "flex", gap: 6, marginTop: 10, position: "relative", flexWrap: "wrap" }}>
-        <button onClick={onImportPreset} className="primary" title="Vyber z hotové sady git_push / approval / CI presetů">
-          📦 Použít preset
+        <button onClick={onImportPreset} className="primary" title={t("wf.preset.btn_title_connector")}>
+          {t("wf.preset.btn")}
         </button>
-        <button onClick={() => setAddOpen((o) => !o)}>+ Přidat konektor</button>
+        <button onClick={() => setAddOpen((o) => !o)}>{t("wf.connectors.add")}</button>
         {addOpen && (
           <div className="wf-popover" style={{ position: "absolute", top: "100%", left: "auto", marginTop: 4, zIndex: 10 }}>
             {connectorTaskTypes.map(([key, meta]) => (
@@ -1817,17 +1817,17 @@ function PresetPickerModal({
     return acc;
   }, {});
   const CATEGORY_META: Record<WorkflowPhasePreset["category"], { label: string; icon: string }> = {
-    ci: { label: "CI & lint gates", icon: "🛡" },
-    git: { label: "Git push", icon: "↑" },
-    approval: { label: "Human approval", icon: "⏸" },
-    deploy: { label: "Deploy & ops", icon: "🚀" },
+    ci: { label: t("wf.preset.cat.ci"), icon: "🛡" },
+    git: { label: t("wf.preset.cat.git"), icon: "↑" },
+    approval: { label: t("wf.preset.cat.approval"), icon: "⏸" },
+    deploy: { label: t("wf.preset.cat.deploy"), icon: "🚀" },
   };
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" role="dialog" aria-modal="true" style={{ width: 720, maxHeight: "80vh", overflow: "auto" }} onClick={(e) => e.stopPropagation()}>
-        <h3 style={{ marginTop: 0 }}>📦 Vyber preset</h3>
+        <h3 style={{ marginTop: 0 }}>{t("wf.preset.modal_title")}</h3>
         <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 12 }}>
-          Hotové konfigurace pro běžné případy. Po importu si je můžeš upravit per-projekt — žádné live napojení na knihovnu, žádná synchronizace zpět.
+          {t("wf.preset.modal_hint")}
         </div>
         {Object.entries(byCategory).map(([cat, presets]) => {
           const meta = CATEGORY_META[cat as WorkflowPhasePreset["category"]];
@@ -1861,10 +1861,10 @@ function PresetPickerModal({
           );
         })}
         {visible.length === 0 && (
-          <div style={{ color: "var(--text-dim)", fontSize: 12 }}>(žádné presety pro tuhle sekci)</div>
+          <div style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("wf.preset.empty")}</div>
         )}
         <div className="form-actions">
-          <button onClick={onClose}>Zavřít</button>
+          <button onClick={onClose}>{t("wf.preset.close")}</button>
         </div>
       </div>
     </div>
