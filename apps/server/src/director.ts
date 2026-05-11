@@ -536,6 +536,29 @@ function enforceGuardrails(
       };
     }
   }
+  // 1a) Junior escalation: after 3 Junior dispatches with at least one
+  //     failed ci_gate in the history, force escalation to Senior. Director's
+  //     prompt asks for the same but Director keeps re-dispatching Junior on
+  //     trivial-looking PHPStan / lint errors that prove to be deeper than
+  //     they look. This hard cap breaks the loop without waiting for the
+  //     4× total cap. Identifies Junior by role=coder + name containing
+  //     "Junior" (works for both "PHP Junior Coder" and bare "Junior Coder").
+  if (targetName) {
+    const targetAgent = project.agents.find((a) => a.name === targetName);
+    if (targetAgent?.role === "coder" && /junior/i.test(targetName)) {
+      const juniorDispatches = history.filter(
+        (t) => t.outcome.kind === "subagent" && t.outcome.subagent === targetName,
+      ).length;
+      const ciFailures = history.filter(
+        (t) => t.outcome.kind === "ci_gate" && t.outcome.ok === false,
+      ).length;
+      if (juniorDispatches >= 3 && ciFailures >= 1) {
+        return {
+          reason: `"${targetName}" already dispatched ${juniorDispatches}× and ci_gate has failed ${ciFailures}× — Junior had its shot at fixing CI. Escalate to a Senior-role coder (deeper expertise) or give_up with a concrete blocker. Don't re-dispatch Junior on the same failure.`,
+        };
+      }
+    }
+  }
   // 1b) dispatch_parallel: enforce read-only sub-agents (role=reviewer) only,
   //     reject empty / >4 targets, and apply per-subagent cap to each target.
   if (action.action === "dispatch_parallel") {
