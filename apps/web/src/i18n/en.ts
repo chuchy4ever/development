@@ -216,6 +216,10 @@ export const en: Record<string, string> = {
   "confirm.apply_template": "Apply this template? It will REPLACE the current playbook and add any missing agents (existing agents are kept).",
   "confirm.delete_team": "Delete team \"{name}\"?",
 
+  // Run view tabs
+  "run.tab.director": "🎬 Director ({count})",
+  "run.tab.log": "📜 Log ({count})",
+
   // Bulk import
   "bulk.spec_intro": "Have a free-form spec (zadani.md, brain dump)? Click and a CTO-style agent will break it down into proper tickets — review the result above and import.",
   "bulk.spec_btn": "↻ Break spec into tickets",

@@ -40,7 +40,7 @@ export function RunView({ runId, onClose }: Props) {
   useLang();
   const [run, setRun] = useState<Run | null>(null);
   const [events, setEvents] = useState<UiEvent[]>([]);
-  const [activeTab, setActiveTab] = useState<"log" | "diff">("log");
+  const [activeTab, setActiveTab] = useState<"director" | "log" | "diff">("director");
   const logEnd = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -332,51 +332,87 @@ export function RunView({ runId, onClose }: Props) {
         )}
         {events.length > 0 && <AgentBreakdown events={events} />}
 
-        <div className="tabs" role="tablist" style={{ marginTop: 12, paddingLeft: 0 }}>
-          <button
-            role="tab"
-            aria-selected={activeTab === "log"}
-            className={`tab tab-button ${activeTab === "log" ? "active" : ""}`}
-            onClick={() => setActiveTab("log")}
-          >
-            {t("run.live_log", { count: events.length })}
-          </button>
-          <button
-            role="tab"
-            aria-selected={activeTab === "diff"}
-            className={`tab tab-button ${activeTab === "diff" ? "active" : ""}`}
-            onClick={() => setActiveTab("diff")}
-          >
-            {t("run.diff", { count: diffs.length })}
-          </button>
-          <div style={{ flex: 1 }} />
-          {activeTab === "log" && events.length > 0 && (
-            <button
-              onClick={() => {
-                const blob = new Blob([JSON.stringify(events, null, 2)], { type: "application/json" });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement("a");
-                a.href = url;
-                a.download = `run-${runId}.json`;
-                a.click();
-                URL.revokeObjectURL(url);
-              }}
-              title={t("run.export_log_title")}
-              style={{ marginRight: 8, alignSelf: "center", fontSize: 11 }}
-            >
-              ⬇ {t("btn.export_log")}
-            </button>
-          )}
-        </div>
+        {(() => {
+          // Pre-filter events per tab so each tab is a focused view instead of
+          // hiding 6 chip filters behind one mega log. Director tab = the
+          // narrative (decisions, dispatches, what each turn did). Log tab =
+          // everything else (tools, phases, system messages, errors) for
+          // debugging. Diff tab = code changes.
+          const directorEvents = events.filter((e) => classifyEvent(e.type) === "director");
+          const restEvents = events.filter((e) => {
+            const k = classifyEvent(e.type);
+            return k !== null && k !== "director" && k !== "diffs";
+          });
+          return (
+            <>
+              <div className="tabs" role="tablist" style={{ marginTop: 12, paddingLeft: 0 }}>
+                <button
+                  role="tab"
+                  aria-selected={activeTab === "director"}
+                  className={`tab tab-button ${activeTab === "director" ? "active" : ""}`}
+                  onClick={() => setActiveTab("director")}
+                >
+                  {t("run.tab.director", { count: directorEvents.length })}
+                </button>
+                <button
+                  role="tab"
+                  aria-selected={activeTab === "log"}
+                  className={`tab tab-button ${activeTab === "log" ? "active" : ""}`}
+                  onClick={() => setActiveTab("log")}
+                >
+                  {t("run.tab.log", { count: restEvents.length })}
+                </button>
+                <button
+                  role="tab"
+                  aria-selected={activeTab === "diff"}
+                  className={`tab tab-button ${activeTab === "diff" ? "active" : ""}`}
+                  onClick={() => setActiveTab("diff")}
+                >
+                  {t("run.diff", { count: diffs.length })}
+                </button>
+                <div style={{ flex: 1 }} />
+                {(activeTab === "director" || activeTab === "log") && events.length > 0 && (
+                  <button
+                    onClick={() => {
+                      const blob = new Blob([JSON.stringify(events, null, 2)], { type: "application/json" });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = `run-${runId}.json`;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    }}
+                    title={t("run.export_log_title")}
+                    style={{ marginRight: 8, alignSelf: "center", fontSize: 11 }}
+                  >
+                    ⬇ {t("btn.export_log")}
+                  </button>
+                )}
+              </div>
 
-        <div style={{ flex: 1, overflow: "auto", padding: "12px 0", minHeight: 0 }}>
-          {activeTab === "log" ? (
-            <LogView events={events} selectedIter={selectedIter} onClearIter={() => setSelectedIter(null)} />
-          ) : (
-            <DiffView diffs={diffs} />
-          )}
-          <div ref={logEnd} />
-        </div>
+              <div style={{ flex: 1, overflow: "auto", padding: "12px 0", minHeight: 0 }}>
+                {activeTab === "director" && (
+                  <LogView
+                    events={directorEvents}
+                    selectedIter={selectedIter}
+                    onClearIter={() => setSelectedIter(null)}
+                    hiddenFilters={["director", "tools", "phases", "system", "errors", "diffs"]}
+                  />
+                )}
+                {activeTab === "log" && (
+                  <LogView
+                    events={restEvents}
+                    selectedIter={selectedIter}
+                    onClearIter={() => setSelectedIter(null)}
+                    hiddenFilters={["director", "diffs"]}
+                  />
+                )}
+                {activeTab === "diff" && <DiffView diffs={diffs} />}
+                <div ref={logEnd} />
+              </div>
+            </>
+          );
+        })()}
       </div>
     </div>
   );
@@ -386,19 +422,24 @@ function LogView({
   events,
   selectedIter,
   onClearIter,
+  hiddenFilters = [],
 }: {
   events: UiEvent[];
   selectedIter: number | null;
   onClearIter: () => void;
+  /** Filter chip keys to hide entirely. Each parent tab pre-filters its events
+   *  so the chips for those categories aren't relevant here. */
+  hiddenFilters?: FilterKey[];
 }) {
   const [filters, setFilters] = useState<Record<FilterKey, boolean>>({
     director: true,
-    tools: false,    // claude_stream is noisy by default
+    tools: false,    // claude_stream is noisy by default — but enabled when this is the only "tools" view
     phases: true,
     system: true,
     errors: true,
     diffs: true,
   });
+  const hidden = new Set(hiddenFilters);
   // Pre-compute iteration boundaries: each director_decision starts a turn,
   // events between this decision (inclusive) and the next director_decision
   // (exclusive) belong to that turn. The very first events (before any
@@ -459,7 +500,7 @@ function LogView({
             ✕ T{selectedIter}
           </button>
         )}
-        {(["director","tools","phases","system","errors","diffs"] as FilterKey[]).map((k) => (
+        {(["director","tools","phases","system","errors","diffs"] as FilterKey[]).filter((k) => !hidden.has(k)).map((k) => (
           <button
             key={k}
             onClick={() => setFilters((f) => ({ ...f, [k]: !f[k] }))}

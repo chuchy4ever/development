@@ -216,6 +216,10 @@ export const cs: Record<string, string> = {
   "confirm.apply_template": "Použít tuto šablonu? PŘEPÍŠE aktuální playbook a přidá chybějící agenty (existující zůstanou).",
   "confirm.delete_team": "Smazat tým „{name}\"?",
 
+  // Run view tabs
+  "run.tab.director": "🎬 Director ({count})",
+  "run.tab.log": "📜 Log ({count})",
+
   // Bulk import
   "bulk.spec_intro": "Máš volný spec (zadani.md, brain dump…)? Klikni a CTO ti ho rozdělí na tickety v správném formátu — pak si je nahoře zreviewuješ a importneš.",
   "bulk.spec_btn": "↻ Rozložit spec na tickety",
