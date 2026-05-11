@@ -644,7 +644,7 @@ function enforceGuardrails(
             reason: `give_up blocked: ci_gate passed (turn ${lastShellCiGreen.iteration}) and git_push hasn't been attempted since. Work is committed in the worktree — run \`run_playbook_phase git_push\` to land it, then mark_done. If git_push then fails persistently, give_up with the SPECIFIC push error.`,
           };
         }
-        if (lastGitPushOk) {
+        if (lastGitPushOk && lastGitPushOutcome) {
           return {
             reason: `give_up blocked: ci_gate is green AND git_push succeeded (turn ${lastGitPushOutcome.iteration}). The work is on origin. Just mark_done.`,
           };
