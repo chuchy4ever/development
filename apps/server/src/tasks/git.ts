@@ -107,9 +107,8 @@ export const gitPushExecutor: TaskExecutor = {
 
       let pushResult: { code: number; stdout: string; stderr: string };
       if (strategy === "squash") {
-        // Engine's auto-merge already FF'd base_branch to worktree HEAD. Roll
-        // that back to the merge-base, redo as a single squash commit with our
-        // template, then push. Skip if there are no actual changes (no-op run).
+        // Merge-base + squash + commit + push. Idempotent w.r.t. whether the
+        // engine's auto-merge already happened (we reset to merge-base anyway).
         const squashRes = await squashAndPush({
           parentPath: repo.local_path,
           baseBranch: repo.default_branch,
@@ -120,8 +119,49 @@ export const gitPushExecutor: TaskExecutor = {
         });
         pushResult = { code: squashRes.code, stdout: squashRes.stdout, stderr: squashRes.stderr };
       } else {
-        // ff_only: just push whatever's on base_branch now.
-        pushResult = await gitRun(["push", remote, repo.default_branch], repo.local_path, controller.signal);
+        // ff_only: merge worktree branch into base_branch then push. Doing the
+        // merge here (not relying on the engine's auto-merge) means git_push
+        // can run as a gate mid-Director-loop, before mark_done — and Director
+        // sees the push verdict on the next turn. Idempotent: if base already
+        // contains the worktree HEAD (engine already auto-merged), the merge
+        // step is a no-op and we just push.
+        pushResult = await ffMergeAndPush({
+          parentPath: repo.local_path,
+          baseBranch: repo.default_branch,
+          runId: ctx.runId,
+          remote,
+          signal: controller.signal,
+        });
+      }
+
+      // Transient push retry: GitLab/GitHub occasionally returns 429, network
+      // blips. Retry up to 2× before declaring failure so Director doesn't
+      // give_up on a 30s outage.
+      let attempt = 0;
+      while (!cancelled && pushResult.code !== 0 && attempt < 2 && isTransientPushError(pushResult.stderr + pushResult.stdout)) {
+        attempt++;
+        const waitMs = 2000 * attempt;
+        ctx.emit("command_output", { phase_id: ctx.phase.id, chunk: `transient push failure, retrying in ${waitMs}ms (${attempt}/2)\n` });
+        await new Promise((r) => setTimeout(r, waitMs));
+        if (strategy === "squash") {
+          const squashRes = await squashAndPush({
+            parentPath: repo.local_path,
+            baseBranch: repo.default_branch,
+            runId: ctx.runId,
+            remote,
+            commitMessage: commitMsg,
+            signal: controller.signal,
+          });
+          pushResult = { code: squashRes.code, stdout: squashRes.stdout, stderr: squashRes.stderr };
+        } else {
+          pushResult = await ffMergeAndPush({
+            parentPath: repo.local_path,
+            baseBranch: repo.default_branch,
+            runId: ctx.runId,
+            remote,
+            signal: controller.signal,
+          });
+        }
       }
 
       const ok = pushResult.code === 0;
@@ -135,6 +175,57 @@ export const gitPushExecutor: TaskExecutor = {
     return aggregateResults({ label: "git_push", results, totalConfigured: ctx.project.repos.length });
   },
 };
+
+/** Conservative transient classifier — false positives just cost one retry,
+ *  false negatives mean Director gives up on something recoverable. */
+function isTransientPushError(output: string): boolean {
+  const s = output.toLowerCase();
+  return /429|too many requests|rate.?limit/.test(s)
+    || /timeout|timed out|etimedout/.test(s)
+    || /could not resolve host|name resolution|enotfound/.test(s)
+    || /connection (reset|refused|closed)|econnreset|econnrefused/.test(s)
+    || /service unavailable|503|502|bad gateway/.test(s);
+}
+
+interface FfMergeArgs {
+  parentPath: string;
+  baseBranch: string;
+  runId: string;
+  remote: string;
+  signal: AbortSignal;
+}
+
+/** ff-only merge the run's worktree branch into base_branch, then push.
+ *  Idempotent — if base already contains worktree HEAD (engine auto-merge
+ *  already ran), the merge is "Already up to date" and push proceeds. */
+async function ffMergeAndPush(args: FfMergeArgs): Promise<{ code: number; stdout: string; stderr: string }> {
+  // Resolve the run's worktree branch by suffix match.
+  const list = await gitRun(["for-each-ref", "--format=%(refname:short)", "refs/heads/ceo/"], args.parentPath, args.signal);
+  if (list.code !== 0) return list;
+  const branchRef = list.stdout.split("\n").map((s) => s.trim()).find((b) => b.endsWith(`-${args.runId}`));
+  if (!branchRef) {
+    return { code: 1, stdout: "", stderr: `git_push: no ceo branch ending in -${args.runId} in ${args.parentPath}` };
+  }
+
+  // Ensure parent is on base_branch (refuse if dirty — never overwrite user state).
+  const status = await gitRun(["status", "--porcelain"], args.parentPath, args.signal);
+  if (status.code !== 0) return status;
+  if (status.stdout.trim()) {
+    return { code: 1, stdout: "", stderr: `git_push: parent ${args.parentPath} has uncommitted changes — refusing merge` };
+  }
+  const head = await gitRun(["rev-parse", "--abbrev-ref", "HEAD"], args.parentPath, args.signal);
+  if (head.stdout.trim() !== args.baseBranch) {
+    const co = await gitRun(["checkout", args.baseBranch], args.parentPath, args.signal);
+    if (co.code !== 0) return co;
+  }
+
+  // ff-only merge worktree branch in. "Already up-to-date" is exit 0.
+  const merge = await gitRun(["merge", "--ff-only", branchRef], args.parentPath, args.signal);
+  if (merge.code !== 0) return merge;
+
+  // Push.
+  return gitRun(["push", args.remote, args.baseBranch], args.parentPath, args.signal);
+}
 
 interface SquashArgs {
   parentPath: string;

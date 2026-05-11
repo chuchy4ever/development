@@ -226,7 +226,13 @@ export function deriveSkillCategory(
   agent?: { name: string; role: AgentRole } | null,
 ): SkillCategory {
   if (phase.category) return phase.category;
-  if (phase.kind === "task" || phase.kind === "command") return "validation";
+  if (phase.kind === "task") {
+    // git_push isn't validation — it's the closing/deploy step that makes
+    // the work delivered. Group with approval gates in the prompt.
+    if (phase.task?.type === "git_push") return "closing";
+    return "validation";
+  }
+  if (phase.kind === "command") return "validation";
   if (phase.kind === "approval") return "closing";
   if (!agent) return "general";
   // Name-based heuristics override role for specialists (a "Closer" is reviewer

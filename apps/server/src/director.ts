@@ -125,6 +125,13 @@ interface CiGateOutcome {
   ok: boolean;
   summary: string;
   details_tail: string;
+  /** When set, identifies which workflow phase emitted this outcome. Used by
+   *  enforceGuardrails to require specific gates (git_push) green before
+   *  mark_done. Unset for the canonical ci_gate (legacy behavior). */
+  phase_id?: string;
+  /** Optional task type tag — lets guardrails check "any git_push green"
+   *  without knowing the user's phase_id naming. */
+  task_type?: string;
 }
 interface TerminalOutcome {
   kind: "terminal";
@@ -229,12 +236,14 @@ function rebuildHistoryFromEvents(
     } else if (ev.type === "director_subagent_done" && pending) {
       let outcome: Outcome;
       const subName = String(payload.subagent ?? "?");
-      if (subName === "ci_gate") {
+      if (subName === "ci_gate" || subName.startsWith("task:")) {
         outcome = {
           kind: "ci_gate",
           ok: !!payload.ok,
           summary: String(payload.summary ?? ""),
           details_tail: "",
+          phase_id: typeof payload.phase_id === "string" ? payload.phase_id : (subName.startsWith("task:") ? subName.slice("task:".length) : undefined),
+          task_type: typeof payload.task_type === "string" ? payload.task_type : undefined,
         };
       } else if (subName === "parallel" && Array.isArray(payload.parallel_results)) {
         const subResults: SubagentOutcome[] = (payload.parallel_results as Array<Record<string, unknown>>).map((r) => ({
@@ -561,13 +570,46 @@ function enforceGuardrails(
       }
     }
   }
-  // 2) mark_done requires at least one successful ci_gate in this run.
+  // 2) mark_done requires at least one successful ci_gate (any phase tagged
+  //    or the canonical run_ci_gate action) in this run.
   if (action.action === "mark_done") {
-    const ciGreen = history.some((t) => t.outcome.kind === "ci_gate" && t.outcome.ok === true);
+    const ciGreen = history.some((t) =>
+      t.outcome.kind === "ci_gate"
+      && t.outcome.ok === true
+      && (t.outcome.task_type === "shell" || t.outcome.task_type === undefined),
+    );
     if (!ciGreen) {
       return {
         reason: `mark_done blocked: no successful ci_gate in this run. Run ci_gate (or run_playbook_phase ci_gate) and confirm it passed before marking done.`,
       };
+    }
+    // 3) If workflow has a git_push gate configured, the LAST git_push
+    //    attempt must have succeeded. Push IS done — code that didn't reach
+    //    the remote isn't delivered.
+    const hasGitPushGate = project.workflow.phases.some(
+      (p) => p.kind === "task" && p.task?.type === "git_push",
+    );
+    if (hasGitPushGate) {
+      // Find the LAST git_push outcome (Director may have run it multiple
+      // times; only the latest counts — that's the current state of origin).
+      let lastGitPush: TurnRecord | null = null;
+      for (let i = history.length - 1; i >= 0; i--) {
+        const t = history[i]!;
+        if (t.outcome.kind === "ci_gate" && t.outcome.task_type === "git_push") {
+          lastGitPush = t;
+          break;
+        }
+      }
+      if (!lastGitPush) {
+        return {
+          reason: `mark_done blocked: workflow has a git_push gate but it hasn't been run yet. Push code to remote before marking done — invoke run_playbook_phase with the git_push phase id (after ci_gate is green).`,
+        };
+      }
+      if (lastGitPush.outcome.kind === "ci_gate" && lastGitPush.outcome.ok !== true) {
+        return {
+          reason: `mark_done blocked: last git_push attempt failed (${lastGitPush.outcome.summary.slice(0, 200)}). Either re-run git_push (it auto-retries transients), or give_up with a concrete reason.`,
+        };
+      }
     }
   }
   return null;
@@ -822,6 +864,7 @@ Read the title + body + episodic memory. Pick ONE bucket:
 ### Closing a run
 
 4. **ci_gate before mark_done — always.** Code-enforced: \`mark_done\` is rejected if no \`ci_gate\` succeeded earlier in this run. After fixes, re-run ci_gate.
+4a. **git_push gate before mark_done — when configured.** If the workflow has a phase with task type \`git_push\`, code enforces that the **last git_push attempt must be ok=true** before \`mark_done\` is accepted. Push IS done — code that didn't reach the remote isn't delivered. Order in a typical run: …Reviewer/Tester → ci_gate green → \`run_playbook_phase git_push\` → mark_done. If git_push fails transiently (auto-retried internally already), Director may re-run it once; persistent failure → give_up with the concrete error.
 5. **Reviewer is REQUIRED before mark_done unless the ticket is trivial.** Before \`mark_done\`, run through this checklist:
    - Did a Reviewer pass on the latest code? If no AND ticket is non-trivial → dispatch Reviewer first.
    - **Mandatory Reviewer triggers (no exceptions):** authentication / authorization, session handling, password / token / secret handling, payments or money movement, permission boundaries, data migration, schema change, deletion of user data, anything touching security headers / CSRF / CORS / SQL queries with user input.
@@ -968,7 +1011,9 @@ function formatOutcome(o: Outcome): string {
     return `[${o.subagent}] ok=${o.ok} commits=+${o.commits_added} cost=$${o.cost_usd.toFixed(2)}${issues}\n  summary: ${o.summary.slice(0, 200)}`;
   }
   if (o.kind === "ci_gate") {
-    return `ci_gate ok=${o.ok}\n  summary: ${o.summary.slice(0, 150)}\n  tail: ${o.details_tail.slice(0, 300)}`;
+    const label = o.task_type && o.task_type !== "shell" ? `${o.task_type} gate` : "ci_gate";
+    const phase = o.phase_id ? ` [${o.phase_id}]` : "";
+    return `${label}${phase} ok=${o.ok}\n  summary: ${o.summary.slice(0, 200)}${o.details_tail ? `\n  tail: ${o.details_tail.slice(0, 300)}` : ""}`;
   }
   if (o.kind === "context_fetched") {
     if (!o.ok) return `fetch_context ${o.connector} FAILED: ${o.error ?? "(unknown)"}`;
@@ -1226,6 +1271,14 @@ async function runPlaybookPhase(
     };
     return runCiGate(args, cfg2);
   }
+  if (kind === "task" && phase.task) {
+    // Generic task gate (git_push and similar): run via the task registry,
+    // surface the verdict as a ci-gate-style outcome so Director sees ok/fail
+    // and can react on the next turn. Tagging the outcome with the phase_id
+    // lets enforceGuardrails check specific gates (e.g. git_push must be
+    // green before mark_done).
+    return runTaskGate(args, phase.id, phase.task.type, phase.task.config as Record<string, unknown>);
+  }
   return {
     kind: "subagent",
     subagent: `playbook:${phaseId}`,
@@ -1282,6 +1335,41 @@ async function fetchContext(
 }
 
 // ---- ci_gate dispatch -------------------------------------------------------
+
+/** Run an arbitrary task (git_push, custom connector) as a Director-visible
+ *  gate. Verdict shows up as CiGateOutcome tagged with phase_id + task_type
+ *  so enforceGuardrails can require specific gates green before mark_done. */
+async function runTaskGate(
+  args: DirectorRunArgs,
+  phaseId: string,
+  taskType: string,
+  taskConfig: Record<string, unknown>,
+): Promise<CiGateOutcome> {
+  args.emit("director_dispatch", { subagent: `task:${phaseId}`, task_type: taskType });
+  const taskCtx: TaskContext = {
+    runId: args.runId,
+    runDir: args.cwd,
+    project: args.project,
+    ticket: args.ticket,
+    phase: args.phase,
+    lastVerdict: null,
+    lastWasFailure: false,
+    emit: (event, payload) => args.emit(event, payload),
+    registerCancel: args.registerCancel,
+    unregisterCancel: args.unregisterCancel,
+  };
+  const verdict = await runTask(taskType, taskConfig, taskCtx);
+  const summary = String(verdict.summary ?? "").slice(0, 400);
+  const tail = String((verdict as { details?: string }).details ?? "").slice(-2000);
+  args.emit("director_subagent_done", {
+    subagent: `task:${phaseId}`,
+    task_type: taskType,
+    phase_id: phaseId,
+    ok: verdict.ok,
+    summary,
+  });
+  return { kind: "ci_gate", ok: !!verdict.ok, summary, details_tail: tail, phase_id: phaseId, task_type: taskType };
+}
 
 async function runCiGate(args: DirectorRunArgs, cfg: DirectorConfig): Promise<CiGateOutcome> {
   let command = cfg.ci_gate_command;

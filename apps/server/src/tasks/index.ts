@@ -23,7 +23,15 @@ register(gitPushExecutor);
  *  aren't gates (no retry routing, never block mark_done). UI groups them in
  *  a separate panel; the engine treats them like any other task but they're
  *  the natural fit for workflow.on_success / on_failure hooks. */
-export const CONNECTOR_TASK_TYPES: ReadonlySet<string> = new Set(["telegram", "github", "jira", "ssh", "git_push"]);
+/** "Connector" tasks fire at run terminal as non-blocking side effects
+ *  (notifications, comments, etc.). They never gate mark_done.
+ *
+ *  Note: `git_push` is intentionally NOT here — it's a blocking gate now.
+ *  Director invokes it explicitly via `run_playbook_phase git_push` and
+ *  `mark_done` is rejected if the workflow has a git_push gate that hasn't
+ *  passed. Push IS done in our model — code that didn't land on the remote
+ *  isn't really delivered. */
+export const CONNECTOR_TASK_TYPES: ReadonlySet<string> = new Set(["telegram", "github", "jira", "ssh"]);
 
 export function isConnectorTask(type: string): boolean {
   return CONNECTOR_TASK_TYPES.has(type);

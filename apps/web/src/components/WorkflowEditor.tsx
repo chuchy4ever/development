@@ -126,7 +126,9 @@ const TASK_TYPES: Record<string, {
     label: "Git push",
     icon: "↑",
     color: "#7c2d12",
-    category: "connector",
+    // Gate, not connector — Director invokes it explicitly before mark_done;
+    // mark_done is blocked until push succeeds. Push IS done in our model.
+    category: "gate",
     defaultConfig: {
       remote: "origin",
       trigger: "success",
@@ -2194,13 +2196,13 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
         onSelect={(id) => setSelectedPhaseId(id)}
         onAddTask={addTaskPhase}
         onAddApproval={addApprovalPhase}
-        onImportPreset={() => setPresetPickerFilter(["ci", "approval"])}
+        onImportPreset={() => setPresetPickerFilter(["ci", "git", "approval"])}
       />
       <ConnectorsPanel
         wf={wf}
         onSelect={(id) => setSelectedPhaseId(id)}
         onAddTask={addTaskPhase}
-        onImportPreset={() => setPresetPickerFilter(["git", "deploy"])}
+        onImportPreset={() => setPresetPickerFilter(["deploy"])}
       />
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4, flexWrap: "wrap" }}>
         <button onClick={save} disabled={busy || !dirty} className={dirty ? "primary" : ""}>
