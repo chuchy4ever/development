@@ -1120,7 +1120,12 @@ function formatOutcome(o: Outcome): string {
   if (o.kind === "ci_gate") {
     const label = o.task_type && o.task_type !== "shell" ? `${o.task_type} gate` : "ci_gate";
     const phase = o.phase_id ? ` [${o.phase_id}]` : "";
-    return `${label}${phase} ok=${o.ok}\n  summary: ${o.summary.slice(0, 200)}${o.details_tail ? `\n  tail: ${o.details_tail.slice(0, 300)}` : ""}`;
+    // Show the LAST 2500 chars of the tail, not the first 300. CI output is
+    // typically structured "noise (context, file scan) → ERROR SUMMARY at the
+    // bottom"; truncating from the front cut off the actual error and left
+    // Director staring at git diff noise (real bug from AGA-60 run ZEClJTg2ME).
+    const tail = o.details_tail ? `\n  tail:\n${o.details_tail.slice(-2500)}` : "";
+    return `${label}${phase} ok=${o.ok}\n  summary: ${o.summary.slice(0, 400)}${tail}`;
   }
   if (o.kind === "context_fetched") {
     if (!o.ok) return `fetch_context ${o.connector} FAILED: ${o.error ?? "(unknown)"}`;
@@ -1488,7 +1493,7 @@ async function runTaskGate(
   };
   const verdict = await runTask(taskType, taskConfig, taskCtx);
   const summary = String(verdict.summary ?? "").slice(0, 400);
-  const tail = String((verdict as { details?: string }).details ?? "").slice(-2000);
+  const tail = String((verdict as { details?: string }).details ?? "").slice(-4000);
   args.emit("director_subagent_done", {
     subagent: `task:${phaseId}`,
     task_type: taskType,
@@ -1542,7 +1547,7 @@ async function runCiGate(args: DirectorRunArgs, cfg: DirectorConfig): Promise<Ci
   };
 
   const verdict = await runTask("shell", { command, timeout_sec: timeoutSec }, taskCtx);
-  const tail = String((verdict as { details?: string }).details ?? "").slice(-2000);
+  const tail = String((verdict as { details?: string }).details ?? "").slice(-4000);
 
   args.emit("director_subagent_done", {
     subagent: "ci_gate",

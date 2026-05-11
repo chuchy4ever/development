@@ -4,7 +4,11 @@ import type { TaskContext, TaskExecutor, TaskVerdict } from "./types.js";
 
 const DEFAULT_TIMEOUT_SEC = 600;
 const MAX_TIMEOUT_SEC = 1800;
-const OUTPUT_TAIL_BYTES = 4096;
+// 8 KB tail captures more PHPStan / pytest / npm error context than 4 KB.
+// CI verdicts often have 1-2 KB of header (test setup, list of files scanned)
+// followed by the actual failures at the bottom; 4 KB was clipping real
+// errors out of the message Director sees.
+const OUTPUT_TAIL_BYTES = 8192;
 
 interface ShellConfig {
   command: string;
