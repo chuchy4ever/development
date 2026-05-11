@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Priority, ProjectWithRepos, Run, Ticket, TicketStatus } from "@ceo/shared";
 import { api } from "../api";
 import { RunView } from "./RunView";
 import { useEscClose } from "../hooks";
 import { t, useLang } from "../i18n";
+import { renderMarkdown } from "../utils/markdown";
+import { formatDurationMs, formatRelativeAge, gitBranchWebUrl, gitRemoteToWebUrl } from "../utils/time";
 
 interface Props {
   ticket: Ticket;
@@ -150,7 +152,38 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
     } finally { setBusy(false); }
   }
 
-  const canStartRun = project.repos.length > 0 && ticket.status !== "running";
+  // Per-ticket aggregations across runs — rolled up once, used in several places.
+  const aggregate = useMemo(() => {
+    let totalCost = 0;
+    let totalWallMs = 0;
+    let badCount = 0;
+    let brokenInProd = false;
+    let lastFinishedAt: string | null = null;
+    for (const r of runs) {
+      if (typeof r.total_cost_usd === "number") totalCost += r.total_cost_usd;
+      if (r.started_at && r.finished_at) {
+        totalWallMs += new Date(r.finished_at).getTime() - new Date(r.started_at).getTime();
+      }
+      if (r.user_verdict === "bad") badCount++;
+      if (r.user_verdict === "broken_in_prod") brokenInProd = true;
+      if (r.finished_at && (!lastFinishedAt || r.finished_at > lastFinishedAt)) {
+        lastFinishedAt = r.finished_at;
+      }
+    }
+    return { totalCost, totalWallMs, badCount, brokenInProd, lastFinishedAt };
+  }, [runs]);
+  const activeRun = runs.find((r) => r.status === "running" || r.status === "pending" || r.status === "awaiting_approval");
+  const lastActivity = activeRun?.started_at ?? aggregate.lastFinishedAt ?? ticket.updated_at;
+
+  /** Concrete reason why the Start run button is disabled — better than a vague
+   *  tooltip. Returns null when the button is enabled. */
+  const startDisabledReason = (() => {
+    if (busy) return t("tm.start_disabled.busy");
+    if (project.repos.length === 0) return t("tm.start_disabled.no_repos");
+    if (activeRun) return t("tm.start_disabled.active_run", { id: activeRun.id.slice(0, 8) });
+    return null;
+  })();
+  const canStartRun = startDisabledReason === null;
 
   return (
     <>
@@ -166,6 +199,20 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
                 <span className="tm-status-dot" style={{ background: STATUS_FG[ticket.status] }} />
                 {ticket.status}
               </div>
+              {aggregate.brokenInProd && (
+                <span title={t("tm.header.verdict_broken")} style={{
+                  padding: "3px 8px", borderRadius: 8, fontSize: 11, fontWeight: 600,
+                  background: "rgba(127, 29, 29, 0.12)", color: "#7f1d1d",
+                  border: "1px solid rgba(127, 29, 29, 0.3)",
+                }}>{t("tm.header.verdict_broken")}</span>
+              )}
+              {!aggregate.brokenInProd && aggregate.badCount > 0 && (
+                <span title={t("tm.header.verdict_bad", { count: aggregate.badCount })} style={{
+                  padding: "3px 8px", borderRadius: 8, fontSize: 11, fontWeight: 600,
+                  background: "rgba(220, 38, 38, 0.1)", color: "#b91c1c",
+                  border: "1px solid rgba(220, 38, 38, 0.3)",
+                }}>{t("tm.header.verdict_bad", { count: aggregate.badCount })}</span>
+              )}
             </div>
 
             {editingTitle ? (
@@ -180,6 +227,11 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
                 {ticket.title}
               </h2>
             )}
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 2, alignItems: "flex-end", fontSize: 11, color: "var(--text-dim)" }}>
+              <span title={ticket.updated_at}>{t("tm.header.updated", { ago: formatRelativeAge(lastActivity) })}</span>
+              <span title={ticket.created_at}>{t("tm.header.created", { ago: formatRelativeAge(ticket.created_at) })}</span>
+            </div>
 
             <button className="tm-close" onClick={onClose} title={t("tm.close_title")}>✕</button>
           </header>
@@ -257,47 +309,83 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
                       </button>
                     </div>
                   </div>
+                ) : ticket.body ? (
+                  <div
+                    className="tm-prose md-body"
+                    onClick={() => setEditingBody(true)}
+                    dangerouslySetInnerHTML={{ __html: renderMarkdown(ticket.body) }}
+                  />
                 ) : (
                   <div className="tm-prose" onClick={() => setEditingBody(true)}>
-                    {ticket.body || <span style={{ color: "var(--text-muted)" }}>{t("tm.body.empty")}</span>}
+                    <span style={{ color: "var(--text-muted)" }}>{t("tm.body.empty")}</span>
                   </div>
                 )}
               </Section>
 
               {ticket.triage_notes && (
                 <Section title={t("tm.section.triage_notes")}>
-                  <div className="tm-callout">{ticket.triage_notes}</div>
+                  <div
+                    className="tm-callout md-body"
+                    dangerouslySetInnerHTML={{ __html: renderMarkdown(ticket.triage_notes) }}
+                  />
                 </Section>
               )}
 
-              {children.length > 0 && (
-                <Section title={t("tm.section.subtasks", { done: children.filter((c) => c.status === "done").length, total: children.length })}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    {children.map((c) => (
-                      <button
-                        key={c.id}
-                        className="tm-link-row"
-                        onClick={() => onOpenTicket?.(c)}
-                      >
-                        {c.ticket_key && <span className="ticket-key">{c.ticket_key}</span>}
-                        {c.priority && (
-                          <span className={`priority-badge priority-${c.priority}`}>{c.priority}</span>
-                        )}
-                        <span style={{ flex: 1, textAlign: "left" }}>{c.title}</span>
-                        <StatusPill status={c.status} />
-                        {c.depends_on.length > 0 && (
-                          <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
-                            ⏸ {c.depends_on.length}
-                          </span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                </Section>
-              )}
+              {children.length > 0 && (() => {
+                const doneCount = children.filter((c) => c.status === "done").length;
+                const pct = Math.round((doneCount / children.length) * 100);
+                return (
+                  <Section title={t("tm.section.subtasks", { done: doneCount, total: children.length })}>
+                    <div style={{
+                      height: 6, borderRadius: 3, background: "var(--gray-soft)",
+                      marginBottom: 10, overflow: "hidden",
+                    }}>
+                      <div style={{
+                        width: `${pct}%`, height: "100%",
+                        background: pct === 100 ? "var(--green)" : "var(--accent)",
+                        transition: "width 200ms",
+                      }} />
+                    </div>
+                    {(["running", "review", "backlog", "blocked", "done", "inbox"] as TicketStatus[]).map((statusGroup) => {
+                      const group = children.filter((c) => c.status === statusGroup);
+                      if (group.length === 0) return null;
+                      return (
+                        <div key={statusGroup} style={{ marginBottom: 8 }}>
+                          <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", color: "var(--text-dim)", marginBottom: 4, letterSpacing: 0.3 }}>
+                            {t(`tm.subtasks.${statusGroup}`)} ({group.length})
+                          </div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            {group.map((c) => (
+                              <button
+                                key={c.id}
+                                className="tm-link-row"
+                                onClick={() => onOpenTicket?.(c)}
+                              >
+                                {c.ticket_key && <span className="ticket-key">{c.ticket_key}</span>}
+                                {c.priority && (
+                                  <span className={`priority-badge priority-${c.priority}`}>{c.priority}</span>
+                                )}
+                                <span style={{ flex: 1, textAlign: "left" }}>{c.title}</span>
+                                {c.depends_on.length > 0 && (
+                                  <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                                    ⏸ {c.depends_on.length}
+                                  </span>
+                                )}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </Section>
+                );
+              })()}
+              <Section title={t("tm.history.title")}>
+                <HistoryTimeline ticket={ticket} runs={runs} />
+              </Section>
 
               {runs.length > 0 && (
-                <Section title={t("tm.section.runs", { count: runs.length })}>
+                <Section title={`${t("tm.section.runs", { count: runs.length })} · $${aggregate.totalCost.toFixed(2)} · ${formatDurationMs(aggregate.totalWallMs)}`}>
                   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                     {runs.map((r) => (
                       <button
@@ -334,9 +422,37 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
 
             <aside className="tm-side">
               <SideField label={t("tm.side.status")}>
-                <select value={ticket.status} onChange={(e) => setStatus(e.target.value as TicketStatus)} disabled={busy}>
-                  {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-                </select>
+                <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                  {STATUSES.map((s) => {
+                    const active = ticket.status === s;
+                    return (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => !active && setStatus(s)}
+                        disabled={busy}
+                        title={s}
+                        style={{
+                          fontSize: 11,
+                          fontWeight: 600,
+                          padding: "3px 8px",
+                          borderRadius: 10,
+                          border: `1px solid ${active ? STATUS_FG[s] : "var(--border)"}`,
+                          background: active ? STATUS_BG[s] : "transparent",
+                          color: active ? STATUS_FG[s] : "var(--text-dim)",
+                          cursor: busy || active ? "default" : "pointer",
+                          display: "flex", alignItems: "center", gap: 4,
+                        }}
+                      >
+                        <span style={{
+                          display: "inline-block", width: 6, height: 6, borderRadius: "50%",
+                          background: STATUS_FG[s],
+                        }} />
+                        {t(`tm.subtasks.${s}`)}
+                      </button>
+                    );
+                  })}
+                </div>
               </SideField>
 
               <SideField label={t("tm.side.priority")}>
@@ -370,11 +486,31 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
                   <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     {project.repos.map((r) => {
                       const on = ticket.repos_touched.includes(r.name);
+                      const branchUrl = gitBranchWebUrl(r.url, r.default_branch);
+                      const webUrl = gitRemoteToWebUrl(r.url);
+                      const host = webUrl ? webUrl.replace(/^https?:\/\//, "").split("/")[0] : null;
                       return (
-                        <label key={r.id} className="tm-checkbox">
-                          <input type="checkbox" checked={on} onChange={() => toggleRepo(r.name)} disabled={busy} />
-                          <span>{r.name}</span>
-                        </label>
+                        <div key={r.id} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                          <label className="tm-checkbox">
+                            <input type="checkbox" checked={on} onChange={() => toggleRepo(r.name)} disabled={busy} />
+                            <span>{r.name}</span>
+                          </label>
+                          {branchUrl && host && (
+                            <a
+                              href={branchUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{
+                                fontSize: 10, color: "var(--text-dim)",
+                                paddingLeft: 22, textDecoration: "none",
+                              }}
+                              onMouseEnter={(e) => { (e.target as HTMLAnchorElement).style.textDecoration = "underline"; }}
+                              onMouseLeave={(e) => { (e.target as HTMLAnchorElement).style.textDecoration = "none"; }}
+                            >
+                              {t("tm.gitlink.branch", { branch: r.default_branch, host })}
+                            </a>
+                          )}
+                        </div>
                       );
                     })}
                   </div>
@@ -423,8 +559,8 @@ export function TicketModal({ ticket, project, allTickets, onOpenTicket, onClose
             <button
               className="primary"
               onClick={startRun}
-              disabled={busy || !canStartRun}
-              title={!canStartRun ? t("tm.btn.start_run_disabled") : t("tm.btn.start_run")}
+              disabled={!canStartRun}
+              title={startDisabledReason ?? t("tm.btn.start_run")}
             >
               {busy ? "..." : t("tm.btn.start_run")}
             </button>
@@ -502,4 +638,67 @@ function runStatusColor(s: Run["status"]): { fg: string; bg: string } {
     case "cancelled": return { fg: "#475569", bg: "var(--gray-soft)" };
     default:          return { fg: "#475569", bg: "var(--gray-soft)" };
   }
+}
+
+/** Chronological event list for the ticket: created → triage → runs (started
+ *  + finished + verdict) → updated. Helps understand the ticket's life cycle
+ *  without piecing it together from disparate sections. */
+function HistoryTimeline({ ticket, runs }: { ticket: Ticket; runs: Run[] }) {
+  interface Event { at: string; label: string; tone: "neutral" | "ok" | "warn" | "fail"; sub?: string }
+  const events: Event[] = [];
+  events.push({ at: ticket.created_at, label: t("tm.history.created"), tone: "neutral" });
+  if (ticket.triage_notes && ticket.priority) {
+    // Triage time isn't stored separately; treat the priority being set as proxy.
+    // Use updated_at as best-available timestamp when there are no runs yet.
+    if (runs.length === 0 && ticket.updated_at !== ticket.created_at) {
+      events.push({ at: ticket.updated_at, label: t("tm.history.triaged"), tone: "neutral", sub: ticket.priority });
+    }
+  }
+  for (const r of runs) {
+    if (r.started_at) {
+      events.push({
+        at: r.started_at,
+        label: t("tm.history.run_started", { id: r.id.slice(0, 6) }),
+        tone: "neutral",
+      });
+    }
+    if (r.finished_at) {
+      const tone: Event["tone"] = r.status === "succeeded" ? "ok" : r.status === "failed" ? "fail" : "warn";
+      events.push({
+        at: r.finished_at,
+        label: t("tm.history.run_finished", { id: r.id.slice(0, 6), status: r.status }),
+        tone,
+        sub: typeof r.total_cost_usd === "number" ? `$${r.total_cost_usd.toFixed(2)}` : undefined,
+      });
+    }
+    if (r.user_verdict && r.user_verdict_at) {
+      events.push({
+        at: r.user_verdict_at,
+        label: t("tm.history.verdict_set", { verdict: r.user_verdict }),
+        tone: r.user_verdict === "good" ? "ok" : "fail",
+      });
+    }
+  }
+  events.sort((a, b) => a.at.localeCompare(b.at));
+  if (events.length === 0) return null;
+  const toneColor: Record<Event["tone"], string> = {
+    neutral: "var(--text-dim)", ok: "var(--green)", warn: "var(--yellow)", fail: "var(--red)",
+  };
+  return (
+    <ol style={{ listStyle: "none", margin: 0, padding: 0, fontSize: 12 }}>
+      {events.map((e, i) => (
+        <li key={i} style={{ display: "grid", gridTemplateColumns: "12px 110px 1fr auto", gap: 8, padding: "3px 0", alignItems: "center" }}>
+          <span style={{
+            display: "inline-block", width: 8, height: 8, borderRadius: "50%",
+            background: toneColor[e.tone], marginLeft: 2,
+          }} />
+          <span style={{ color: "var(--text-dim)", fontFamily: "ui-monospace, monospace", fontSize: 11 }}>
+            {new Date(e.at).toLocaleString()}
+          </span>
+          <span>{e.label}</span>
+          {e.sub && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{e.sub}</span>}
+        </li>
+      ))}
+    </ol>
+  );
 }

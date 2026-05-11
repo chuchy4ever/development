@@ -12,6 +12,7 @@
 import { useEffect, useState } from "react";
 import { api, type ProjectSecretMasked } from "../api";
 import { t } from "../i18n";
+import { formatRelativeAge } from "../utils/time";
 
 type Scope =
   | { scope: "project"; projectId: string }
@@ -193,16 +194,3 @@ export function ConnectorSecretsPanel({ scope, title, intro }: Props) {
   );
 }
 
-/** Compact "5m ago" / "2h ago" / "3d ago" formatter for the last-tested
- *  timestamp on connector health. Threshold based, no localization. */
-function formatRelativeAge(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  if (!Number.isFinite(ms) || ms < 0) return "";
-  const m = Math.floor(ms / 60000);
-  if (m < 1) return t("age.just_now");
-  if (m < 60) return t("age.minutes", { n: m });
-  const h = Math.floor(m / 60);
-  if (h < 24) return t("age.hours", { n: h });
-  const d = Math.floor(h / 24);
-  return t("age.days", { n: d });
-}

@@ -246,6 +246,36 @@ export const en: Record<string, string> = {
   "tm.run.no_cost": "(no cost yet)",
   "tm.run.waiting_for_dispatch": "Waiting for dispatch",
   "tm.close_title": "Close (Esc)",
+  // Header meta
+  "tm.header.updated": "Updated {ago}",
+  "tm.header.created": "Created {ago}",
+  "tm.header.verdict_bad": "⚠ {count} run(s) marked bad",
+  "tm.header.verdict_broken": "💥 Broke in production",
+  // Runs section enhancements
+  "tm.runs.rollup": "{count} run{plural} · ${cost} · {wall}",
+  "tm.runs.plural_one": "",
+  "tm.runs.plural_many": "s",
+  // Subtasks grouping
+  "tm.subtasks.done": "Done",
+  "tm.subtasks.running": "Running",
+  "tm.subtasks.backlog": "Backlog",
+  "tm.subtasks.blocked": "Blocked",
+  "tm.subtasks.review": "Review",
+  "tm.subtasks.inbox": "Inbox",
+  "tm.subtasks.progress": "{done}/{total} done",
+  // GitLab/GitHub link
+  "tm.gitlink.branch": "↗ {branch} on {host}",
+  // History timeline
+  "tm.history.title": "Timeline",
+  "tm.history.created": "Created",
+  "tm.history.triaged": "Triaged",
+  "tm.history.run_started": "Run {id} started",
+  "tm.history.run_finished": "Run {id} finished ({status})",
+  "tm.history.verdict_set": "Verdict: {verdict}",
+  // Start run disable reasons
+  "tm.start_disabled.no_repos": "Project has no repos",
+  "tm.start_disabled.active_run": "Active run {id} is in progress — wait for it",
+  "tm.start_disabled.busy": "Another action is in progress — wait",
 
   // Run view tabs
   "run.tab.overview": "📊 Overview",

@@ -246,6 +246,36 @@ export const cs: Record<string, string> = {
   "tm.run.no_cost": "(bez nákladů)",
   "tm.run.waiting_for_dispatch": "Čeká na dispatch",
   "tm.close_title": "Zavřít (Esc)",
+  // Header meta
+  "tm.header.updated": "Upraveno {ago}",
+  "tm.header.created": "Vytvořeno {ago}",
+  "tm.header.verdict_bad": "⚠ {count}× označený jako špatný",
+  "tm.header.verdict_broken": "💥 Rozbilo se v produkci",
+  // Runs section enhancements
+  "tm.runs.rollup": "{count} běh{plural} · ${cost} · {wall}",
+  "tm.runs.plural_one": "",
+  "tm.runs.plural_many": "ů",
+  // Subtasks grouping
+  "tm.subtasks.done": "Hotovo",
+  "tm.subtasks.running": "Běží",
+  "tm.subtasks.backlog": "Backlog",
+  "tm.subtasks.blocked": "Zablokováno",
+  "tm.subtasks.review": "Review",
+  "tm.subtasks.inbox": "Inbox",
+  "tm.subtasks.progress": "{done}/{total} hotovo",
+  // GitLab/GitHub link
+  "tm.gitlink.branch": "↗ {branch} na {host}",
+  // History timeline
+  "tm.history.title": "Časová osa",
+  "tm.history.created": "Vytvořeno",
+  "tm.history.triaged": "Triage proběhla",
+  "tm.history.run_started": "Spuštěn běh {id}",
+  "tm.history.run_finished": "Dokončen běh {id} ({status})",
+  "tm.history.verdict_set": "Verdikt: {verdict}",
+  // Start run disable reasons
+  "tm.start_disabled.no_repos": "Projekt nemá žádné repos",
+  "tm.start_disabled.active_run": "Aktivní běh {id} ještě běží — počkej na dokončení",
+  "tm.start_disabled.busy": "Probíhá jiná akce — počkej",
 
   // Run view tabs
   "run.tab.overview": "📊 Přehled",
