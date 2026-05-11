@@ -110,6 +110,7 @@ export function runClaude(opts: ClaudeRunOptions): Promise<ClaudeResult> {
     const child = spawn(CLAUDE_BIN, args, {
       cwd: opts.cwd,
       env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
     let stderr = "";

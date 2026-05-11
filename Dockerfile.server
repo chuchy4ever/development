@@ -6,13 +6,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install dependencies (native addons compiled here)
+# Install dependencies as root (native addons need build tools)
 COPY package.json package-lock.json ./
 COPY apps/server/package.json ./apps/server/
 COPY apps/web/package.json ./apps/web/
 COPY packages/shared/package.json ./packages/shared/
 
-RUN npm install
+# node user (uid 1000) matches host roman — chown so named volumes are accessible
+RUN npm install && chown -R node:node /app
+
+USER node
 
 # Source is mounted at runtime for hot-reload (tsx watch)
 CMD ["npm", "run", "dev:server"]

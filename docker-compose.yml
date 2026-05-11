@@ -3,6 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.server
+    user: "1000:1000"
     ports:
       - "4000:4000"
     volumes:
@@ -13,15 +14,16 @@ services:
       - server_app_node_modules:/app/apps/server/node_modules
       - shared_node_modules:/app/packages/shared/node_modules
       # Data directory
-      - /home/roman/.ceo:/root/.ceo
-      # Host home dir — makes /home/roman/projects/* visible inside container for folder picker
-      - /home/roman:/home/roman
+      - ${CEO_DATA_DIR}:${CEO_DATA_DIR}
+      # Host home dir — folder picker + claude auth (user runs as uid 1000 = host user)
+      - ${HOST_HOME}:${HOST_HOME}
       # claude CLI from host
-      - ${CEO_CLAUDE_BIN:-/home/roman/.nvm/versions/node/v24.14.1/bin/claude}:/usr/local/bin/claude:ro
+      - ${CEO_CLAUDE_BIN}:/usr/local/bin/claude:ro
     environment:
-      - CEO_DATA_DIR=/root/.ceo
+      - CEO_DATA_DIR=${CEO_DATA_DIR}
       - CEO_CLAUDE_BIN=/usr/local/bin/claude
       - PORT=4000
+      - HOME=${HOST_HOME}
 
   web:
     image: node:20-alpine
