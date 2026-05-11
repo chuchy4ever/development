@@ -25,7 +25,21 @@ export function Kanban({ tickets, activeRuns, onCardClick }: Props) {
   const byStatus: Record<TicketStatus, Ticket[]> = {
     inbox: [], backlog: [], running: [], review: [], done: [], blocked: [],
   };
-  for (const t of tickets) byStatus[t.status].push(t);
+  for (const ticket of tickets) {
+    // Running tickets whose currently-active sub-agent has a reviewer/tester
+    // role render in the Review column. Without this the Review column is
+    // dead lane (ticket lifecycle skips `review` and goes running → done
+    // directly); with it, you see the kanban move forward as Director dispatches
+    // Reviewer / Tester during a run.
+    let col: TicketStatus = ticket.status;
+    if (col === "running") {
+      const r = activeByTicket.get(ticket.id);
+      if (r?.agent_role === "reviewer" || r?.agent_role === "tester") {
+        col = "review";
+      }
+    }
+    byStatus[col].push(ticket);
+  }
 
   // Cross-column relationships, computed once.
   const titleById = new Map<string, string>();
