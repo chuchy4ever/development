@@ -103,6 +103,23 @@ export const gitPushExecutor: TaskExecutor = {
     for (const repo of ctx.project.repos) {
       if (cancelled) break;
       const preview = `${remote} ${repo.default_branch} (${repo.name}, ${strategy})`;
+
+      // Skip repos that this run didn't touch — the ticket may only modify a
+      // subset of project repos (e.g. plant-api-only ticket in a 2-repo
+      // project). No worktree branch exists, nothing to push; treat as no-op
+      // success so the gate doesn't fail on uninvolved repos.
+      const branchProbe = await gitRun(
+        ["for-each-ref", "--format=%(refname:short)", "refs/heads/ceo/"],
+        repo.local_path,
+        controller.signal,
+      );
+      const branchExists = branchProbe.code === 0
+        && branchProbe.stdout.split("\n").map((s) => s.trim()).some((b) => b.endsWith(`-${ctx.runId}`));
+      if (!branchExists) {
+        results.push({ ok: true, preview, status: 0, body: `no worktree branch for this run in ${repo.name} — skipped (ticket didn't touch this repo)` });
+        continue;
+      }
+
       ctx.emit("command_start", { phase_id: ctx.phase.id, command: `git push → ${preview}` });
 
       let pushResult: { code: number; stdout: string; stderr: string };
