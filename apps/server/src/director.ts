@@ -1081,12 +1081,33 @@ function formatOutcome(o: Outcome): string {
 // ---- Sub-agent dispatch -----------------------------------------------------
 
 function resolveAvailableSubagents(project: ProjectWithRepos, cfg: DirectorConfig): string[] {
+  // Explicit override always wins.
   if (cfg.available_subagents && cfg.available_subagents.length > 0) {
     return cfg.available_subagents.filter((n) => project.agents.some((a) => a.name === n));
   }
-  return project.agents
-    .filter((a) => !SUBAGENT_BLACKLIST.has(a.name))
+  // Otherwise the workflow IS the contract: only agents referenced by a phase
+  // (kind=agent, agent_id set) are dispatchable. Agents that exist in
+  // project.agents but aren't wired into the workflow are intentional
+  // off-the-shelf templates or internal-only roles (CTO via decompose,
+  // Memory Curator via post-run hook) — Director should NOT surface them
+  // as dispatch targets.
+  const wiredAgentIds = new Set(
+    (project.workflow.phases ?? [])
+      .filter((p) => p.kind === "agent" && p.agent_id)
+      .map((p) => p.agent_id as string),
+  );
+  const wired = project.agents
+    .filter((a) => wiredAgentIds.has(a.id) && !SUBAGENT_BLACKLIST.has(a.name))
     .map((a) => a.name);
+  // Safety fallback: if workflow has no agent phases yet (fresh project),
+  // fall back to all non-blacklisted agents so the system isn't unusable
+  // until the user wires up a workflow.
+  if (wired.length === 0) {
+    return project.agents
+      .filter((a) => !SUBAGENT_BLACKLIST.has(a.name))
+      .map((a) => a.name);
+  }
+  return wired;
 }
 
 async function dispatchSubagent(
