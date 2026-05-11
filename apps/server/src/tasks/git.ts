@@ -273,27 +273,29 @@ async function squashAndPush(args: SquashArgs): Promise<{ code: number; stdout: 
   }
 
   // 2. Find merge-base of baseBranch and the worktree branch — the point from
-  //    which the run's work diverged. Reset baseBranch back there to undo the
-  //    engine's FF auto-merge cleanly.
+  //    which the run's work diverged. Reset baseBranch back there if base has
+  //    advanced past it (i.e. the engine's FF auto-merge already moved base
+  //    forward); otherwise leave base where it is.
   const mb = await gitRun(["merge-base", "HEAD", branchRef], args.parentPath, args.signal);
   if (mb.code !== 0) return mb;
   const baseSha = mb.stdout.trim();
   if (!baseSha) return { code: 1, stdout: "", stderr: "merge-base returned empty" };
 
-  // 3. If HEAD is already at merge-base (engine didn't actually FF — e.g. no
-  //    new commits), nothing to squash; treat as no-op success.
+  // 3. Reset base back to merge-base ONLY if HEAD has advanced past it (post-
+  //    auto-merge case). When HEAD === merge-base (the typical gate-mode case
+  //    where git_push runs before the engine's auto-merge), we're already at
+  //    the right place; skipping the reset avoids a pointless --hard.
   const headSha = await gitRun(["rev-parse", "HEAD"], args.parentPath, args.signal);
-  if (headSha.stdout.trim() === baseSha) {
-    return { code: 0, stdout: "no new commits to squash", stderr: "" };
+  if (headSha.stdout.trim() !== baseSha) {
+    const reset = await gitRun(["reset", "--hard", baseSha], args.parentPath, args.signal);
+    if (reset.code !== 0) return reset;
   }
 
-  // 4. Reset to merge-base, squash merge, commit with template.
-  const reset = await gitRun(["reset", "--hard", baseSha], args.parentPath, args.signal);
-  if (reset.code !== 0) return reset;
+  // 4. Squash-merge the worktree branch.
   const sq = await gitRun(["merge", "--squash", branchRef], args.parentPath, args.signal);
   if (sq.code !== 0) return sq;
-  // Check if anything was actually staged. Squash on an already-merged branch
-  // produces no diff → commit would fail with "nothing to commit".
+  // Squash on an already-merged or empty branch produces no diff → commit
+  // would fail with "nothing to commit". Authoritative emptiness check.
   const diff = await gitRun(["diff", "--cached", "--quiet"], args.parentPath, args.signal);
   if (diff.code === 0) {
     return { code: 0, stdout: "squash produced no changes (already merged)", stderr: "" };
