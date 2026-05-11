@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
-import type { AgentTemplate, WorkflowPreset } from "@ceo/shared";
+import type { AgentTemplate, Project, WorkflowPreset } from "@ceo/shared";
 import { api } from "../api";
 import type { AdminSection, Route } from "../router";
+import { JobsAdmin } from "./JobsAdmin";
+import { ConnectorSecretsPanel } from "./ConnectorSecretsPanel";
+import { JobActivityFeed } from "./JobActivityFeed";
 
 interface Props {
   route: Route;
@@ -10,6 +13,10 @@ interface Props {
 
 export function AdminView({ route, navigate }: Props) {
   const section: AdminSection = route.adminSection;
+  const [projects, setProjects] = useState<Project[]>([]);
+  useEffect(() => {
+    api.listProjects().then(setProjects).catch(() => {});
+  }, []);
   return (
     <>
       <div className="toolbar">
@@ -19,19 +26,26 @@ export function AdminView({ route, navigate }: Props) {
         </div>
       </div>
       <div className="tabs">
-        {(["overview", "templates", "activity"] as AdminSection[]).map((s) => (
+        {(["overview", "templates", "jobs", "jobruns", "connectors", "activity"] as AdminSection[]).map((s) => (
           <div
             key={s}
             className={`tab ${section === s ? "active" : ""}`}
             onClick={() => navigate({ adminSection: s })}
           >
-            {s.charAt(0).toUpperCase() + s.slice(1)}
+            {s === "jobs" ? "Plánované úlohy"
+              : s === "jobruns" ? "Logy úloh"
+              : s === "connectors" ? "Connectors"
+              : s === "activity" ? "Tickety"
+              : s.charAt(0).toUpperCase() + s.slice(1)}
           </div>
         ))}
       </div>
       <div className="content">
         {section === "overview" && <Overview onProjectClick={(id) => navigate({ view: "project", projectId: id, tab: "board" })} />}
         {section === "templates" && <Templates />}
+        {section === "jobs" && <JobsAdmin projects={projects} />}
+        {section === "jobruns" && <JobActivityFeed projects={projects} />}
+        {section === "connectors" && <ConnectorSecretsPanel scope={{ scope: "global" }} />}
         {section === "activity" && <Activity onTicketClick={(pid, tid) => navigate({ view: "project", projectId: pid, tab: "board", ticketId: tid })} />}
       </div>
     </>
@@ -302,11 +316,7 @@ function Templates() {
       {showImport && (
         <div className="modal-backdrop" onClick={() => setShowImport(false)}>
           <div className="modal" role="dialog" aria-modal="true" style={{ width: 720 }} onClick={(e) => e.stopPropagation()}>
-            <h3>Import workflow template</h3>
-            <p style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 0 }}>
-              Paste a template JSON (exported from another instance, or a curated team setup).
-              The template's <code>key</code> determines the file name.
-            </p>
+            <h3 style={{ marginTop: 0 }}>Import workflow template</h3>
             <textarea
               value={importText}
               onChange={(e) => setImportText(e.target.value)}
@@ -513,7 +523,7 @@ function SkillTemplateEditor({
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             <div className="form-row">
-              <label>Default skill category (used when imported)</label>
+              <label>Bucket v knihovně</label>
               <select
                 value={tpl.default_skill_category ?? ""}
                 onChange={(e) => setTpl({ ...tpl, default_skill_category: (e.target.value || undefined) as any })}
@@ -527,10 +537,16 @@ function SkillTemplateEditor({
                 <option value="infra">Infra</option>
                 <option value="general">General</option>
               </select>
+              <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 2 }}>
+                Do kterého swimlane padne když se importne do projektu.
+              </div>
             </div>
             <div className="form-row">
-              <label>Category (free text — agent definition)</label>
-              <input value={tpl.category} onChange={(e) => setTpl({ ...tpl, category: e.target.value })} />
+              <label>Tag (volný text)</label>
+              <input value={tpl.category} onChange={(e) => setTpl({ ...tpl, category: e.target.value })} placeholder="Development, QA, …" />
+              <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 2 }}>
+                Jen popisek na agentovi — interní organizace.
+              </div>
             </div>
           </div>
           <div className="form-row">
@@ -672,6 +688,73 @@ function Activity({ onTicketClick }: { onTicketClick: (projectId: string, ticket
               )}
             </div>
           </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
+            <div className="settings-section" style={{ marginBottom: 0 }}>
+              <h4 style={{ marginTop: 0, marginBottom: 8, fontSize: 13 }}>Subagent dispatches</h4>
+              {metrics.subagent_stats.length === 0 ? (
+                <div style={{ color: "var(--text-dim)", fontSize: 12 }}>No director runs yet.</div>
+              ) : (
+                <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ color: "var(--text-dim)" }}>
+                      <th style={{ textAlign: "left", padding: "0 0 4px", fontWeight: 500 }}>skill</th>
+                      <th style={{ textAlign: "right", padding: "0 0 4px", fontWeight: 500 }}>n</th>
+                      <th style={{ textAlign: "right", padding: "0 0 4px", fontWeight: 500 }}>ok rate</th>
+                      <th style={{ textAlign: "right", padding: "0 0 4px", fontWeight: 500 }}>avg $</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {metrics.subagent_stats.map((s) => {
+                      const rated = s.ok_count + s.fail_count;
+                      const okPct = rated > 0 ? (s.ok_count / rated) * 100 : null;
+                      const okColor = okPct === null ? "var(--text-dim)" : okPct >= 80 ? "#047857" : okPct >= 50 ? "#b45309" : "#b91c1c";
+                      return (
+                        <tr key={s.subagent} style={{ borderBottom: "1px solid var(--border)" }}>
+                          <td style={{ padding: "4px 0" }}>{s.subagent}</td>
+                          <td style={{ padding: "4px 0", textAlign: "right", fontFamily: "ui-monospace, monospace" }}>{s.dispatched}</td>
+                          <td style={{ padding: "4px 0", textAlign: "right", color: okColor, fontWeight: 600 }}>
+                            {okPct === null ? "—" : `${okPct.toFixed(0)}%`}
+                          </td>
+                          <td style={{ padding: "4px 0", textAlign: "right", fontFamily: "ui-monospace, monospace" }}>
+                            ${s.avg_cost_usd.toFixed(2)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            <div className="settings-section" style={{ marginBottom: 0 }}>
+              <h4 style={{ marginTop: 0, marginBottom: 8, fontSize: 13 }}>User verdicts</h4>
+              {(() => {
+                const v = metrics.verdict_stats;
+                const total = v.good + v.bad + v.broken_in_prod + v.unrated;
+                if (total === 0) return <div style={{ color: "var(--text-dim)", fontSize: 12 }}>No completed runs yet.</div>;
+                const Row = ({ label, n, color }: { label: string; n: number; color: string }) => (
+                  <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                    <td style={{ padding: "4px 0" }}>{label}</td>
+                    <td style={{ padding: "4px 0", textAlign: "right", color, fontWeight: 600 }}>{n}</td>
+                    <td style={{ padding: "4px 0", textAlign: "right", color: "var(--text-dim)" }}>
+                      {total > 0 ? `${((n / total) * 100).toFixed(0)}%` : "—"}
+                    </td>
+                  </tr>
+                );
+                return (
+                  <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
+                    <tbody>
+                      <Row label="✓ Funguje" n={v.good} color="#047857" />
+                      <Row label="✗ Špatně" n={v.bad} color="#b91c1c" />
+                      <Row label="⚠ Rozbilo se v produkci" n={v.broken_in_prod} color="#7f1d1d" />
+                      <Row label="Bez verdiktu" n={v.unrated} color="var(--text-dim)" />
+                    </tbody>
+                  </table>
+                );
+              })()}
+            </div>
+          </div>
+
           {metrics.daily_series.length > 0 && (
             <div className="settings-section" style={{ marginBottom: 0 }}>
               <h4 style={{ marginTop: 0, marginBottom: 8, fontSize: 13 }}>Daily activity</h4>

@@ -13,12 +13,32 @@ import type {
   Project,
   ProjectWithRepos,
   Run,
+  RunUserVerdict,
   RunEvent,
+  ConnectorHealthRow,
   SchedulerMode,
   SchedulerStatus,
   Ticket,
   WorkflowDefinition,
+  ScheduledJob,
+  CreateScheduledJobInput,
+  UpdateScheduledJobInput,
+  JobRun,
 } from "@ceo/shared";
+
+/** UI-safe representation of one project secret/config entry. The full
+ *  plaintext value never leaves the server — `display` is masked for token-
+ *  typed entries (last 4 chars) and full text for non-secret config. */
+export interface ProjectSecretMasked {
+  key: string;
+  label: string;
+  secret: boolean;
+  hint?: string;
+  source: "project" | "env" | "unset";
+  display: string;
+  has_project_value: boolean;
+  updated_at: string | null;
+}
 
 async function req<T>(
   url: string,
@@ -64,6 +84,48 @@ export const api = {
     req<ProjectWithRepos>(`/api/projects/${projectId}/repos/${repoId}`, {
       method: "DELETE",
     }),
+
+  listProjectSecrets: (projectId: string) =>
+    req<ProjectSecretMasked[]>(`/api/projects/${projectId}/secrets`),
+  setProjectSecret: (projectId: string, key: string, value: string) =>
+    req<ProjectSecretMasked[]>(`/api/projects/${projectId}/secrets/${encodeURIComponent(key)}`, {
+      method: "PUT",
+      body: JSON.stringify({ value }),
+    }),
+  deleteProjectSecret: (projectId: string, key: string) =>
+    req<ProjectSecretMasked[]>(`/api/projects/${projectId}/secrets/${encodeURIComponent(key)}`, {
+      method: "DELETE",
+    }),
+  testProjectSecretGroup: (projectId: string, group: "github" | "jira" | "ssh") =>
+    req<{ ok: boolean; message: string }>(`/api/projects/${projectId}/secrets/${group}/test`, {
+      method: "POST",
+    }),
+  copyDefaultSecretToProject: (projectId: string, key: string) =>
+    req<ProjectSecretMasked[]>(`/api/projects/${projectId}/secrets/${encodeURIComponent(key)}/copy-from-default`, {
+      method: "POST",
+    }),
+
+  // Global (admin-level) secrets — paralelní s project secrets, používané pro
+  // globální joby a jako fallback pro projekty s prázdným polem.
+  listGlobalSecrets: () =>
+    req<ProjectSecretMasked[]>(`/api/admin/secrets`),
+  setGlobalSecret: (key: string, value: string) =>
+    req<ProjectSecretMasked[]>(`/api/admin/secrets/${encodeURIComponent(key)}`, {
+      method: "PUT",
+      body: JSON.stringify({ value }),
+    }),
+  deleteGlobalSecret: (key: string) =>
+    req<ProjectSecretMasked[]>(`/api/admin/secrets/${encodeURIComponent(key)}`, {
+      method: "DELETE",
+    }),
+  testGlobalSecretGroup: (group: "github" | "jira" | "ssh") =>
+    req<{ ok: boolean; message: string }>(`/api/admin/secrets/${group}/test`, {
+      method: "POST",
+    }),
+  globalConnectorHealth: () =>
+    req<ConnectorHealthRow[]>(`/api/admin/connector-health`),
+  projectConnectorHealth: (projectId: string) =>
+    req<ConnectorHealthRow[]>(`/api/projects/${projectId}/connector-health`),
 
   listTickets: (projectId: string) =>
     req<Ticket[]>(`/api/projects/${projectId}/tickets`),
@@ -133,6 +195,12 @@ export const api = {
     }),
   deleteRun: (runId: string) =>
     req<void>(`/api/runs/${runId}`, { method: "DELETE" }),
+  setRunVerdict: (runId: string, verdict: RunUserVerdict | null, note?: string) =>
+    req<Run>(`/api/runs/${runId}/verdict`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ verdict, note: note ?? null }),
+    }),
   listAgents: (projectId: string) =>
     req<Agent[]>(`/api/projects/${projectId}/agents`),
   createAgent: (projectId: string, input: CreateAgentInput) =>
@@ -214,6 +282,14 @@ export const api = {
       daily_series: Array<{ date: string; succeeded: number; failed: number; cost: number }>;
       top_failing_phases: Array<{ phase_id: string; fails: number }>;
       longest_phases: Array<{ phase_id: string; avg_duration_ms: number; samples: number }>;
+      subagent_stats: Array<{
+        subagent: string;
+        dispatched: number;
+        ok_count: number;
+        fail_count: number;
+        avg_cost_usd: number;
+      }>;
+      verdict_stats: { good: number; bad: number; broken_in_prod: number; unrated: number };
     }>(`/api/admin/metrics?days=${days}`),
 
   adminOverview: () =>
@@ -273,6 +349,12 @@ export const api = {
       body: JSON.stringify({ content }),
     }),
 
+  extractTicketsFromSpec: (projectId: string, spec: string) =>
+    req<{ markdown: string }>(`/api/projects/${projectId}/tickets/extract-from-spec`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ spec }),
+    }),
   bulkImport: (projectId: string, input: BulkImportInput) =>
     req<BulkImportResult>(`/api/projects/${projectId}/tickets/bulk`, {
       method: "POST",
@@ -300,6 +382,49 @@ export const api = {
       pr_method: "gh" | "compare-link" | "skipped";
       error?: string;
     }[]>(`/api/runs/${runId}/pr`, { method: "POST" }),
+
+  // ---- Scheduled jobs ------------------------------------------------------
+
+  listJobs: (filter: { project_id?: string | null } = {}) => {
+    const q = filter.project_id === undefined ? "" :
+      filter.project_id === null ? "?project_id=null" :
+      `?project_id=${encodeURIComponent(filter.project_id)}`;
+    return req<ScheduledJob[]>(`/api/jobs${q}`);
+  },
+  getJob: (id: string) => req<ScheduledJob>(`/api/jobs/${id}`),
+  createJob: (input: CreateScheduledJobInput) =>
+    req<ScheduledJob>("/api/jobs", { method: "POST", body: JSON.stringify(input) }),
+  updateJob: (id: string, patch: UpdateScheduledJobInput) =>
+    req<ScheduledJob>(`/api/jobs/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteJob: (id: string) => req<void>(`/api/jobs/${id}`, { method: "DELETE" }),
+  runJobNow: (id: string) =>
+    req<{ ok: boolean; result: string }>(`/api/jobs/${id}/run-now`, { method: "POST" }),
+  previewSchedule: (schedule: string) =>
+    req<{ ok: boolean; next_run_at: string | null; error?: string }>("/api/jobs/preview", {
+      method: "POST",
+      body: JSON.stringify({ schedule }),
+    }),
+
+  // Persistent job execution log.
+  listJobRuns: (filter: { project_id?: string | null; job_id?: string; since?: string; ok?: boolean; notable?: boolean; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (filter.project_id === null) q.set("project_id", "null");
+    else if (filter.project_id) q.set("project_id", filter.project_id);
+    if (filter.job_id) q.set("job_id", filter.job_id);
+    if (filter.since) q.set("since", filter.since);
+    if (filter.ok !== undefined) q.set("ok", String(filter.ok));
+    if (filter.notable) q.set("notable", "true");
+    if (filter.limit) q.set("limit", String(filter.limit));
+    const qs = q.toString();
+    return req<JobRun[]>(`/api/job-runs${qs ? `?${qs}` : ""}`);
+  },
+  getJobRun: (id: number) => req<JobRun>(`/api/job-runs/${id}`),
+  unreadJobRunsCount: (since: string, projectId?: string | null) => {
+    const q = new URLSearchParams({ since });
+    if (projectId === null) q.set("project_id", "null");
+    else if (projectId) q.set("project_id", projectId);
+    return req<{ count: number }>(`/api/job-runs/unread-count?${q.toString()}`);
+  },
 };
 
 /** Open an SSE connection to a run's event stream. */

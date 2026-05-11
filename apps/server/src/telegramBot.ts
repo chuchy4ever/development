@@ -36,6 +36,7 @@ import {
 } from "./config.js";
 import { nanoid } from "nanoid";
 import { clearHistory, handleAssistantMessage } from "./telegramAssistant.js";
+import { sendTelegramMessage, tg } from "./telegramOut.js";
 
 interface TgUpdate {
   update_id: number;
@@ -49,42 +50,8 @@ interface TgMessage {
   text?: string;
 }
 
-const API_BASE = () => `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
-
-async function tg<T = unknown>(method: string, body?: Record<string, unknown>): Promise<T> {
-  const res = await fetch(`${API_BASE()}/${method}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const json = (await res.json()) as { ok: boolean; result?: T; description?: string };
-  if (!json.ok) throw new Error(`Telegram ${method}: ${json.description ?? "error"}`);
-  return json.result as T;
-}
-
-async function sendMessage(chatId: number, text: string, replyTo?: number): Promise<TgMessage> {
-  // Try Markdown first (most messages use bold / italic / code formatting).
-  // If Telegram rejects the entities (unbalanced underscores in user-supplied
-  // content like errors / IDs / agent prompts), fall back to plain text so
-  // the message still gets delivered. This used to drop entire replies.
-  try {
-    return await tg<TgMessage>("sendMessage", {
-      chat_id: chatId,
-      text,
-      parse_mode: "Markdown",
-      reply_to_message_id: replyTo,
-      disable_web_page_preview: true,
-    });
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (!/can't parse entities/i.test(msg)) throw e;
-    return tg<TgMessage>("sendMessage", {
-      chat_id: chatId,
-      text,
-      reply_to_message_id: replyTo,
-      disable_web_page_preview: true,
-    });
-  }
+async function sendMessage(chatId: number, text: string, replyTo?: number): Promise<void> {
+  await sendTelegramMessage(chatId, text, { replyTo });
 }
 
 function isAllowed(userId: number | undefined): boolean {
@@ -225,10 +192,48 @@ async function handleHelp(chatId: number, replyTo: number): Promise<void> {
     "Commands:",
     "  /help — this message",
     "  /list — active runs",
+    "  /jobs — scheduled jobs (recurring tickets, digests, maintenance windows)",
+    "  /digest — push a digest of the last 24h to this chat now",
     "  /quick @KEY title body — skip the chat, dispatch a ticket directly",
     "  /reset — clear the conversation history with the assistant",
     "  /chatid — show this chat's numeric id (use it for TELEGRAM_OUTPUT_CHAT_ID)",
   ].join("\n"), replyTo);
+}
+
+async function handleJobsList(chatId: number, replyTo: number): Promise<void> {
+  const { listJobs } = await import("./scheduledJobs.js");
+  const jobs = listJobs();
+  if (jobs.length === 0) {
+    await sendMessage(chatId, "No scheduled jobs. Create one via API `POST /api/jobs` or ask me in chat.", replyTo);
+    return;
+  }
+  const lines = jobs.slice(0, 10).map((j) => {
+    const next = j.next_run_at ? new Date(j.next_run_at).toISOString().slice(0, 16).replace("T", " ") : "—";
+    const status = j.enabled ? "✅" : "⏸";
+    const schedule = j.trigger.type === "cron" ? j.trigger.schedule : `watch ${j.trigger.source}`;
+    return `${status} *${j.name}* (${j.action.type})\n  trigger: \`${schedule}\`\n  next: ${next}`;
+  });
+  await sendMessage(chatId, lines.join("\n\n"), replyTo);
+}
+
+async function handleDigestNow(chatId: number, replyTo: number): Promise<void> {
+  // Synthesize a one-shot digest job and fire it immediately.
+  const { createJob, fireJobNow, deleteJob } = await import("./scheduledJobs.js");
+  try {
+    const job = createJob({
+      name: `manual digest (${new Date().toISOString().slice(0, 16)})`,
+      // @once in the past = won't auto-fire; we trigger it manually.
+      trigger: { type: "cron", schedule: "@once:1970-01-01T00:00:00Z" },
+      enabled: false,
+      action: { type: "telegram_digest", chat_id: chatId, lookback_hours: 24 },
+    });
+    const r = await fireJobNow(job.id);
+    deleteJob(job.id);
+    if (!r.ok) await sendMessage(chatId, `❌ Digest failed: ${r.result}`, replyTo);
+  } catch (e: unknown) {
+    const m = e instanceof Error ? e.message : String(e);
+    await sendMessage(chatId, `❌ Digest error: ${m}`, replyTo);
+  }
 }
 
 async function handleList(chatId: number, replyTo: number): Promise<void> {
@@ -267,6 +272,8 @@ async function handleMessage(msg: TgMessage): Promise<void> {
   }
   if (text.startsWith("/help") || text === "/start") return handleHelp(msg.chat.id, msg.message_id);
   if (text.startsWith("/list")) return handleList(msg.chat.id, msg.message_id);
+  if (text.startsWith("/jobs")) return handleJobsList(msg.chat.id, msg.message_id);
+  if (text.startsWith("/digest")) return handleDigestNow(msg.chat.id, msg.message_id);
   if (text.startsWith("/quick ")) {
     // Fast path: skip the assistant, go straight to ticket-and-run.
     await handleNewTicket(msg, text.slice("/quick ".length).trim());
@@ -325,6 +332,17 @@ async function handleConversation(msg: TgMessage, text: string): Promise<void> {
   }
   if (response.dispatchError) {
     await sendMessage(msg.chat.id, `❌ Dispatch failed: ${response.dispatchError}`, msg.message_id);
+  }
+  if (response.jobCreated) {
+    const j = response.jobCreated;
+    const next = j.next_run_at ? new Date(j.next_run_at).toISOString().slice(0, 16).replace("T", " ") : "—";
+    await sendMessage(
+      msg.chat.id,
+      `🗓 Scheduled *${j.name}* (${j.kind})\nschedule: \`${j.schedule}\`\nnext: ${next}`,
+    );
+  }
+  if (response.jobError) {
+    await sendMessage(msg.chat.id, `❌ Job not scheduled: ${response.jobError}`, msg.message_id);
   }
 }
 

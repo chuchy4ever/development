@@ -30,6 +30,7 @@ export function BulkImportModal({ project, onClose, onCreated }: Props) {
   const [markdown, setMarkdown] = useState("");
   const [autoTriage, setAutoTriage] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [extracting, setExtracting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [result, setResult] = useState<{ created: number; triaged: number } | null>(null);
 
@@ -49,6 +50,20 @@ export function BulkImportModal({ project, onClose, onCreated }: Props) {
     }
   }
 
+  async function extractFromSpec() {
+    if (!markdown.trim()) return;
+    setExtracting(true);
+    setErr(null);
+    try {
+      const r = await api.extractTicketsFromSpec(project.id, markdown);
+      setMarkdown(r.markdown);
+    } catch (e: any) {
+      setErr(e.message || String(e));
+    } finally {
+      setExtracting(false);
+    }
+  }
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <form className="modal" role="dialog" aria-modal="true" style={{ width: 720 }} onClick={(e) => e.stopPropagation()} onSubmit={submit}>
@@ -62,6 +77,19 @@ export function BulkImportModal({ project, onClose, onCreated }: Props) {
             rows={14}
             style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
           />
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, padding: "8px 10px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 6 }}>
+          <span style={{ fontSize: 11, color: "var(--text-dim)", flex: 1 }}>
+            Máš volný spec (zadani.md, brain dump…)? Klikni a CTO ti ho rozdělí na tickety v správném formátu — pak si je nahoře zreviewuješ a importneš.
+          </span>
+          <button
+            type="button"
+            onClick={extractFromSpec}
+            disabled={busy || extracting || !markdown.trim()}
+            style={{ fontSize: 11, padding: "4px 10px" }}
+          >
+            {extracting ? "Rozkládám…" : "↻ Rozložit spec na tickety"}
+          </button>
         </div>
         <label style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--text-dim)", fontSize: 12 }}>
           <input

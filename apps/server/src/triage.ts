@@ -1,5 +1,6 @@
 import type { ProjectWithRepos, Ticket } from "@ceo/shared";
 import { runAgentOneShot } from "./oneShot.js";
+import { extractCostFromStdout, recordCost } from "./costLog.js";
 import { extractJsonWithFallback } from "./jsonUtil.js";
 
 export interface TriageOutput {
@@ -75,6 +76,11 @@ Classify this ticket. Return JSON only.`;
     { system_prompt: SYSTEM_PROMPT, allowed_tools: [] },
     prompt,
   );
+  recordCost({
+    source: "triage",
+    cost_usd: extractCostFromStdout(res.stdout),
+    project_id: project.id,
+  });
   const parsed = extractJsonWithFallback<TriageOutput>(res.stdout);
   if (!parsed) {
     throw new Error(`Triage returned unparseable output: ${res.stdout.slice(0, 500)}`);

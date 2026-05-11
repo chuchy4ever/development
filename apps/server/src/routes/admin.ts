@@ -5,8 +5,49 @@ import os from "node:os";
 import { db } from "../db.js";
 import { DATA_DIR } from "../config.js";
 import type { WorkflowPreset } from "@ceo/shared";
+import { listGlobalSecretsMasked, setGlobalSecret, deleteGlobalSecret, getGlobalSecret } from "../globalSecrets.js";
+import { testConnector, listConnectorHealth } from "../connectorTests.js";
 
 export const adminRouter = Router();
+
+// ---- Global (admin-level) connector secrets ----------------------------------
+// Mirrors /api/projects/:id/secrets but at the server level. Used by jobs
+// without a project_id (global watch_github / review_pr) and as a fallback
+// for projects that leave a key blank.
+
+adminRouter.get("/secrets", (_req, res) => {
+  res.json(listGlobalSecretsMasked());
+});
+
+adminRouter.put("/secrets/:key", (req, res) => {
+  const value = String(req.body?.value ?? "");
+  try {
+    setGlobalSecret(req.params.key, value);
+    res.json(listGlobalSecretsMasked());
+  } catch (e: unknown) {
+    res.status(400).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+adminRouter.delete("/secrets/:key", (req, res) => {
+  deleteGlobalSecret(req.params.key);
+  res.json(listGlobalSecretsMasked());
+});
+
+adminRouter.post("/secrets/:group/test", async (req, res) => {
+  try {
+    const result = await testConnector(req.params.group, getGlobalSecret, "global");
+    res.json(result);
+  } catch (e: unknown) {
+    res.status(500).json({ ok: false, message: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+/** Stored health rows for global connectors. UI uses this to render last-tested
+ *  + status badges without re-hitting the API. */
+adminRouter.get("/connector-health", (_req, res) => {
+  res.json(listConnectorHealth("global"));
+});
 
 interface OverviewStats {
   projects_count: number;
@@ -115,6 +156,17 @@ interface MetricsResponse {
   daily_series: Array<{ date: string; succeeded: number; failed: number; cost: number }>;
   top_failing_phases: Array<{ phase_id: string; fails: number }>;
   longest_phases: Array<{ phase_id: string; avg_duration_ms: number; samples: number }>;
+  /** Per-subagent dispatch stats from director runs. ok_count / fail_count are
+   *  derived from director_subagent_done events; avg_cost from cost_usd payload. */
+  subagent_stats: Array<{
+    subagent: string;
+    dispatched: number;
+    ok_count: number;
+    fail_count: number;
+    avg_cost_usd: number;
+  }>;
+  /** User verdict counts on completed runs in the window. */
+  verdict_stats: { good: number; bad: number; broken_in_prod: number; unrated: number };
 }
 
 adminRouter.get("/metrics", (req, res) => {
@@ -205,6 +257,62 @@ adminRouter.get("/metrics", (req, res) => {
       samples: r.samples,
     }));
 
+  // Subagent dispatch stats: aggregate director_subagent_done events. The ok
+  // field is bool-or-null; we count true/false explicitly so null (no verdict)
+  // doesn't tip either side.
+  const subagentRows = db
+    .prepare(
+      `SELECT json_extract(payload, '$.subagent') AS subagent,
+              SUM(CASE WHEN json_extract(payload, '$.ok') = 1 THEN 1 ELSE 0 END) AS ok_count,
+              SUM(CASE WHEN json_extract(payload, '$.ok') = 0 THEN 1 ELSE 0 END) AS fail_count,
+              COUNT(*) AS dispatched,
+              AVG(json_extract(payload, '$.cost_usd')) AS avg_cost
+         FROM run_events
+        WHERE type = 'director_subagent_done'
+          AND ts >= datetime('now', ?)
+        GROUP BY subagent
+        ORDER BY dispatched DESC
+        LIMIT 20`,
+    )
+    .all(`-${days} days`) as Array<{
+      subagent: string | null;
+      ok_count: number;
+      fail_count: number;
+      dispatched: number;
+      avg_cost: number | null;
+    }>;
+  const subagent_stats = subagentRows
+    .filter((r) => r.subagent !== null)
+    .map((r) => ({
+      subagent: r.subagent as string,
+      dispatched: r.dispatched,
+      ok_count: r.ok_count,
+      fail_count: r.fail_count,
+      avg_cost_usd: r.avg_cost ?? 0,
+    }));
+
+  // Verdict stats: count rated runs in the window (regardless of run status —
+  // a "broken_in_prod" verdict can be set on a `succeeded` run). Unrated =
+  // succeeded/failed runs with no user_verdict, so the user can see how much
+  // signal is missing.
+  const verdictRow = db
+    .prepare(
+      `SELECT
+         SUM(CASE WHEN user_verdict = 'good' THEN 1 ELSE 0 END) AS good,
+         SUM(CASE WHEN user_verdict = 'bad' THEN 1 ELSE 0 END) AS bad,
+         SUM(CASE WHEN user_verdict = 'broken_in_prod' THEN 1 ELSE 0 END) AS broken_in_prod,
+         SUM(CASE WHEN user_verdict IS NULL AND status IN ('succeeded','failed') THEN 1 ELSE 0 END) AS unrated
+       FROM runs
+       WHERE created_at >= date('now', ?)`,
+    )
+    .get(`-${days} days`) as { good: number; bad: number; broken_in_prod: number; unrated: number };
+  const verdict_stats = {
+    good: verdictRow.good ?? 0,
+    bad: verdictRow.bad ?? 0,
+    broken_in_prod: verdictRow.broken_in_prod ?? 0,
+    unrated: verdictRow.unrated ?? 0,
+  };
+
   const out: MetricsResponse = {
     window_days: days,
     run_counts,
@@ -213,6 +321,8 @@ adminRouter.get("/metrics", (req, res) => {
     daily_series: dailyRows,
     top_failing_phases,
     longest_phases,
+    subagent_stats,
+    verdict_stats,
   };
   res.json(out);
 });

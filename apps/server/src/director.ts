@@ -24,7 +24,7 @@ import { loadAgent } from "./store.js";
 import { db } from "./db.js";
 import { streamClaude } from "./claude.js";
 import { extractJsonWithFallback } from "./jsonUtil.js";
-import { runTask } from "./tasks/index.js";
+import { runTask, readTask } from "./tasks/index.js";
 import type { TaskContext } from "./tasks/index.js";
 import { decomposeTicket } from "./ctoDecompose.js";
 import { diffWorktree } from "./git.js";
@@ -53,6 +53,12 @@ export interface DirectorResult {
   iterations: number;
   total_cost_usd: number;
   decomposed?: { subticket_count: number };
+  /** Set when Director paused mid-run (e.g. budget exhausted) and should be
+   *  resumed via decideApproval. The engine writes the run as `awaiting_approval`
+   *  so the user can extend budget (approve) or cancel (reject). */
+  paused?:
+    | { reason: "budget_exhausted"; budget_usd: number }
+    | { reason: "human_review"; question: string; rationale: string };
 }
 
 // ---- Decision schema --------------------------------------------------------
@@ -63,7 +69,42 @@ interface PlaybookPhaseAction { action: "run_playbook_phase"; phase_id: string; 
 interface DecomposeAction { action: "request_decompose"; reason: string }
 interface DoneAction { action: "mark_done"; summary: string }
 interface GiveUpAction { action: "give_up"; reason: string }
-type DirectorAction = DispatchAction | CiGateAction | PlaybookPhaseAction | DecomposeAction | DoneAction | GiveUpAction;
+/** Pull external data from one of the project's configured connectors so the
+ *  next dispatch can include it in the sub-agent's notes. Result is logged
+ *  to run_events as `director_context_fetched` and replayed on resume. */
+interface FetchContextAction {
+  action: "fetch_context";
+  connector: "jira" | "github" | "ssh";
+  /** Connector-specific params; see TaskReadParams in tasks/types.ts. */
+  params: Record<string, unknown>;
+}
+/** Dispatch multiple read-only sub-agents (Reviewer, Tester, Lint Gate, …)
+ *  concurrently against the same worktree. They share the diff but each
+ *  produces its own verdict. Director sees aggregated outcomes on the next
+ *  turn and can react to ALL findings at once instead of fixing iteratively.
+ *
+ *  Code-enforced: each sub-agent in `targets` must have role `reviewer`. Coder
+ *  parallelism is disallowed until we add per-dispatch worktree branches +
+ *  merge logic. */
+interface DispatchParallelAction {
+  action: "dispatch_parallel";
+  targets: Array<{ subagent: string; notes: string }>;
+}
+/** Pause the run for human input. Surfaces as awaiting_approval in the UI;
+ *  user can approve (run resumes from next iteration with the answer in
+ *  history) or reject (run cancels). Use sparingly — for ambiguous specs,
+ *  irreversible decisions (deletes, deploys), or plan sign-off before code. */
+interface RequestHumanReviewAction {
+  action: "request_human_review";
+  /** Short rationale shown above the question. */
+  rationale: string;
+  /** The actual question to the user (concrete, not "should I proceed?"). */
+  question: string;
+}
+type DirectorAction =
+  | DispatchAction | CiGateAction | PlaybookPhaseAction
+  | DecomposeAction | DoneAction | GiveUpAction
+  | FetchContextAction | RequestHumanReviewAction | DispatchParallelAction;
 
 interface DirectorDecision {
   rationale: string;
@@ -90,7 +131,32 @@ interface TerminalOutcome {
   status: "succeeded" | "failed" | "decomposed";
   reason: string;
 }
-type Outcome = SubagentOutcome | CiGateOutcome | TerminalOutcome;
+interface ContextFetchedOutcome {
+  kind: "context_fetched";
+  connector: string;
+  ok: boolean;
+  /** Markdown summary returned by the connector (or empty on failure). */
+  content: string;
+  error?: string;
+}
+interface HumanReviewOutcome {
+  kind: "human_review";
+  /** True if user clicked Approve, false on Reject. */
+  approved: boolean;
+  /** Free-text response the user typed. May be empty. */
+  note: string;
+}
+interface ParallelDispatchOutcome {
+  kind: "parallel_dispatch";
+  /** Per-sub-agent results. Order matches the requested targets. */
+  results: SubagentOutcome[];
+  total_cost_usd: number;
+  /** True if every sub-agent returned ok=true. */
+  all_ok: boolean;
+}
+type Outcome =
+  | SubagentOutcome | CiGateOutcome | TerminalOutcome
+  | ContextFetchedOutcome | HumanReviewOutcome | ParallelDispatchOutcome;
 
 interface TurnRecord {
   iteration: number;
@@ -98,10 +164,140 @@ interface TurnRecord {
   outcome: Outcome;
 }
 
+// ---- History rebuild --------------------------------------------------------
+
+/** Reconstruct Director's in-memory history from `director_decision` and
+ *  `director_subagent_done` events. Lets a resumed run (paused for budget,
+ *  awaiting_approval, or server restart) continue without re-running prior
+ *  turns. Total cost is summed from event payloads to recover spend exactly. */
+function rebuildHistoryFromEvents(
+  runId: string,
+): { history: TurnRecord[]; totalCost: number; lastIter: number } {
+  const events = db
+    .prepare(
+      `SELECT type, payload FROM run_events
+        WHERE run_id = ? AND type IN ('director_decision', 'director_subagent_done', 'director_context_fetched', 'director_human_review_resolved')
+        ORDER BY id ASC`,
+    )
+    .all(runId) as { type: string; payload: string }[];
+
+  const history: TurnRecord[] = [];
+  let totalCost = 0;
+  let lastIter = 0;
+  let pending: { iteration: number; decision: DirectorDecision } | null = null;
+
+  const flushTerminalPending = () => {
+    if (!pending) return;
+    const a = pending.decision.action;
+    if (a.action === "mark_done") {
+      history.push({
+        iteration: pending.iteration,
+        decision: pending.decision,
+        outcome: { kind: "terminal", status: "succeeded", reason: a.summary },
+      });
+    } else if (a.action === "give_up") {
+      history.push({
+        iteration: pending.iteration,
+        decision: pending.decision,
+        outcome: { kind: "terminal", status: "failed", reason: a.reason },
+      });
+    }
+    // request_decompose terminates with a separate path; not reconstructable
+    // from these events alone — but we never pause after decompose, so resume
+    // doesn't need to see it.
+    pending = null;
+  };
+
+  for (const ev of events) {
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(ev.payload) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (ev.type === "director_decision") {
+      flushTerminalPending();
+      const action = payload.action as DirectorAction | undefined;
+      if (!action) continue;
+      const iteration = Number(payload.iteration ?? 0);
+      pending = {
+        iteration,
+        decision: { rationale: String(payload.rationale ?? ""), action },
+      };
+      if (iteration > lastIter) lastIter = iteration;
+      totalCost += Number(payload.cost_usd ?? 0);
+    } else if (ev.type === "director_subagent_done" && pending) {
+      let outcome: Outcome;
+      const subName = String(payload.subagent ?? "?");
+      if (subName === "ci_gate") {
+        outcome = {
+          kind: "ci_gate",
+          ok: !!payload.ok,
+          summary: String(payload.summary ?? ""),
+          details_tail: "",
+        };
+      } else if (subName === "parallel" && Array.isArray(payload.parallel_results)) {
+        const subResults: SubagentOutcome[] = (payload.parallel_results as Array<Record<string, unknown>>).map((r) => ({
+          kind: "subagent",
+          subagent: String(r.subagent ?? "?"),
+          ok: (r.ok as boolean | null | undefined) ?? null,
+          summary: String(r.summary ?? ""),
+          issues: Array.isArray(r.issues) ? (r.issues as { severity?: string; message?: string }[]) : [],
+          commits_added: 0,
+          cost_usd: Number(r.cost_usd ?? 0),
+        }));
+        const total = Number(payload.cost_usd ?? subResults.reduce((s, r) => s + r.cost_usd, 0));
+        outcome = {
+          kind: "parallel_dispatch",
+          results: subResults,
+          total_cost_usd: total,
+          all_ok: subResults.every((r) => r.ok === true),
+        };
+        totalCost += total;
+      } else {
+        const subagentCost = Number(payload.cost_usd ?? 0);
+        outcome = {
+          kind: "subagent",
+          subagent: subName,
+          ok: (payload.ok as boolean | null | undefined) ?? null,
+          summary: String(payload.summary ?? ""),
+          issues: [],
+          commits_added: Number(payload.commits_added ?? 0),
+          cost_usd: subagentCost,
+        };
+        totalCost += subagentCost;
+      }
+      history.push({ iteration: pending.iteration, decision: pending.decision, outcome });
+      pending = null;
+    } else if (ev.type === "director_context_fetched" && pending) {
+      const outcome: ContextFetchedOutcome = {
+        kind: "context_fetched",
+        connector: String(payload.connector ?? "?"),
+        ok: !!payload.ok,
+        content: String(payload.content ?? ""),
+        error: typeof payload.error === "string" ? payload.error : undefined,
+      };
+      history.push({ iteration: pending.iteration, decision: pending.decision, outcome });
+      pending = null;
+    } else if (ev.type === "director_human_review_resolved" && pending) {
+      const outcome: HumanReviewOutcome = {
+        kind: "human_review",
+        approved: !!payload.approved,
+        note: String(payload.note ?? ""),
+      };
+      history.push({ iteration: pending.iteration, decision: pending.decision, outcome });
+      pending = null;
+    }
+  }
+  flushTerminalPending();
+
+  return { history, totalCost, lastIter };
+}
+
 // ---- Constants --------------------------------------------------------------
 
 const DEFAULT_MAX_ITERATIONS = 12;
-const DEFAULT_BUDGET_USD = 8;
+const DEFAULT_BUDGET_USD = 20;
 const DIRECTOR_MODEL = "claude-sonnet-4-6";
 const SUBAGENT_BLACKLIST = new Set(["CTO", "Memory Curator", "Director"]);
 /** Hard cap on dispatches of any single sub-agent in one Director run. The
@@ -114,11 +310,20 @@ const MAX_DISPATCHES_PER_SUBAGENT = 4;
 export async function runDirectorPhase(args: DirectorRunArgs): Promise<DirectorResult> {
   const cfg = (args.phase.director ?? args.project.workflow.director_config ?? {}) as DirectorConfig;
   const maxIter = cfg.max_iterations ?? DEFAULT_MAX_ITERATIONS;
-  const budget = cfg.budget_usd ?? DEFAULT_BUDGET_USD;
+  // Per-run budget override takes precedence (set when user approves a budget
+  // extension after a paused run). Falls back to project config, then default.
+  const overrideRow = db
+    .prepare("SELECT director_budget_override_usd FROM runs WHERE id = ?")
+    .get(args.runId) as { director_budget_override_usd: number | null } | undefined;
+  const budget =
+    overrideRow?.director_budget_override_usd ?? cfg.budget_usd ?? DEFAULT_BUDGET_USD;
 
-  const history: TurnRecord[] = [];
-  let totalCost = 0;
-  let iter = 0;
+  // Rebuild history from persisted events so resumes (after pause or server
+  // restart) pick up where we left off without re-paying for prior turns.
+  const rebuilt = rebuildHistoryFromEvents(args.runId);
+  const history: TurnRecord[] = rebuilt.history;
+  let totalCost = rebuilt.totalCost;
+  let iter = rebuilt.lastIter;
 
   const subagents = resolveAvailableSubagents(args.project, cfg);
 
@@ -127,14 +332,29 @@ export async function runDirectorPhase(args: DirectorRunArgs): Promise<DirectorR
     budget_usd: budget,
     available_subagents: subagents,
     project_brief: cfg.project_brief ?? null,
+    resumed_turns: history.length || undefined,
+    resumed_cost_usd: history.length > 0 ? totalCost : undefined,
   });
 
   while (iter < maxIter) {
     iter++;
 
     if (totalCost >= budget) {
-      args.emit("director_end", { reason: "budget_exhausted", total_cost_usd: totalCost, iterations: iter });
-      return { ok: false, summary: `Budget $${budget} exhausted at $${totalCost.toFixed(2)}`, iterations: iter, total_cost_usd: totalCost };
+      // Pause (not fail) — caller writes the run as awaiting_approval so the
+      // user can extend budget and resume, or cancel.
+      args.emit("director_paused", {
+        reason: "budget_exhausted",
+        total_cost_usd: totalCost,
+        budget_usd: budget,
+        iterations: iter,
+      });
+      return {
+        ok: false,
+        summary: `Paused: budget $${budget.toFixed(2)} exhausted at $${totalCost.toFixed(2)}`,
+        iterations: iter,
+        total_cost_usd: totalCost,
+        paused: { reason: "budget_exhausted", budget_usd: budget },
+      };
     }
 
     let decision: DirectorDecision;
@@ -186,7 +406,7 @@ export async function runDirectorPhase(args: DirectorRunArgs): Promise<DirectorR
     }
     if (action.action === "request_decompose") {
       try {
-        const result = await decomposeTicket(args.project, args.ticket);
+        const result = await decomposeTicket(args.project, args.ticket, args.runId);
         args.emit("director_end", {
           reason: "decompose_requested",
           decomposed: result.decomposed,
@@ -218,6 +438,13 @@ export async function runDirectorPhase(args: DirectorRunArgs): Promise<DirectorR
       continue;
     }
 
+    if (action.action === "dispatch_parallel") {
+      const outcome = await dispatchParallel(args, action.targets);
+      totalCost += outcome.total_cost_usd;
+      history.push({ iteration: iter, decision, outcome });
+      continue;
+    }
+
     if (action.action === "run_ci_gate") {
       const outcome = await runCiGate(args, cfg);
       history.push({ iteration: iter, decision, outcome });
@@ -229,6 +456,29 @@ export async function runDirectorPhase(args: DirectorRunArgs): Promise<DirectorR
       if (outcome.kind === "subagent") totalCost += outcome.cost_usd;
       history.push({ iteration: iter, decision, outcome });
       continue;
+    }
+
+    if (action.action === "fetch_context") {
+      const outcome = await fetchContext(args, action);
+      history.push({ iteration: iter, decision, outcome });
+      continue;
+    }
+
+    if (action.action === "request_human_review") {
+      args.emit("director_paused", {
+        reason: "human_review",
+        question: action.question,
+        rationale: action.rationale,
+        iterations: iter,
+        total_cost_usd: totalCost,
+      });
+      return {
+        ok: false,
+        summary: `Awaiting human review: ${action.question}`,
+        iterations: iter,
+        total_cost_usd: totalCost,
+        paused: { reason: "human_review", question: action.question, rationale: action.rationale },
+      };
     }
 
     args.emit("system", { msg: `Director returned unknown action: ${JSON.stringify(action)}` });
@@ -277,6 +527,40 @@ function enforceGuardrails(
       };
     }
   }
+  // 1b) dispatch_parallel: enforce read-only sub-agents (role=reviewer) only,
+  //     reject empty / >4 targets, and apply per-subagent cap to each target.
+  if (action.action === "dispatch_parallel") {
+    if (action.targets.length === 0) {
+      return { reason: "dispatch_parallel needs ≥1 target" };
+    }
+    if (action.targets.length > 4) {
+      return { reason: `dispatch_parallel cap is 4 targets, got ${action.targets.length}` };
+    }
+    const seen = new Set<string>();
+    for (const t of action.targets) {
+      if (seen.has(t.subagent)) {
+        return { reason: `dispatch_parallel: duplicate target "${t.subagent}" (each sub-agent only once per parallel batch)` };
+      }
+      seen.add(t.subagent);
+      const agent = project.agents.find((a) => a.name === t.subagent);
+      if (!agent) {
+        return { reason: `dispatch_parallel: unknown sub-agent "${t.subagent}"` };
+      }
+      if (agent.role !== "reviewer") {
+        return {
+          reason: `dispatch_parallel: "${t.subagent}" has role "${agent.role}" — only reviewer-role sub-agents allowed (no concurrent code writers yet)`,
+        };
+      }
+      const count = history.filter(
+        (h) => h.outcome.kind === "subagent" && h.outcome.subagent === t.subagent,
+      ).length + history.filter(
+        (h) => h.outcome.kind === "parallel_dispatch" && h.outcome.results.some((r) => r.subagent === t.subagent),
+      ).reduce((acc, h) => acc + (h.outcome.kind === "parallel_dispatch" ? h.outcome.results.filter((r) => r.subagent === t.subagent).length : 0), 0);
+      if (count >= MAX_DISPATCHES_PER_SUBAGENT) {
+        return { reason: `dispatch_parallel: "${t.subagent}" already dispatched ${count}× (cap ${MAX_DISPATCHES_PER_SUBAGENT})` };
+      }
+    }
+  }
   // 2) mark_done requires at least one successful ci_gate in this run.
   if (action.action === "mark_done") {
     const ciGreen = history.some((t) => t.outcome.kind === "ci_gate" && t.outcome.ok === true);
@@ -294,6 +578,33 @@ function enforceGuardrails(
 interface DirectorCallReturn {
   decision: DirectorDecision;
   cost: number;
+  /** Set when the claude CLI itself failed (non-zero exit + stderr matching
+   *  rate-limit / network / timeout). callDirector retries on this with
+   *  exponential backoff before falling through to parse-retry. */
+  transient?: { reason: string };
+}
+
+/** Sniff stderr / exit status for a known transient claude CLI failure mode.
+ *  Conservative — false positives just mean we retry an extra time, but false
+ *  negatives mean a give_up that could have been recovered. */
+function detectTransient(exitCode: number, stderr: string, stdoutBuf: string): { reason: string } | null {
+  // Successful exit but possible rate-limit event in the stream.
+  if (exitCode === 0) {
+    if (/"type"\s*:\s*"rate_limit_event"/.test(stdoutBuf) && stdoutBuf.length < 500) {
+      return { reason: "rate_limit_event in stream, no result" };
+    }
+    return null;
+  }
+  const tail = stderr.slice(-1000).toLowerCase();
+  if (/rate.?limit|429/.test(tail)) return { reason: `rate limit (exit ${exitCode})` };
+  if (/timeout|etimedout|timed out/.test(tail)) return { reason: `timeout (exit ${exitCode})` };
+  if (/econnreset|enotfound|enetunreach|econnrefused|connection (reset|refused|closed)/.test(tail)) {
+    return { reason: `network (exit ${exitCode})` };
+  }
+  if (/overloaded|service unavailable|503|502/.test(tail)) {
+    return { reason: `upstream overloaded (exit ${exitCode})` };
+  }
+  return null;
 }
 
 async function callDirector(
@@ -303,13 +614,47 @@ async function callDirector(
 ): Promise<DirectorCallReturn> {
   const cfg = (args.phase.director ?? args.project.workflow.director_config ?? {}) as DirectorConfig;
   const systemPrompt = buildDirectorSystemPrompt(budget.subagents, cfg, args.project);
+  const turnPrompt = buildDirectorTurnPrompt(args, history, budget);
 
-  // Try once normally; if Director returns unparseable output, retry once with
-  // a strict reminder. Avoids burning a give_up on a one-off formatting glitch.
-  let { decision, cost } = await callDirectorOnce(args, systemPrompt, buildDirectorTurnPrompt(args, history, budget));
+  // Up to 3 attempts on transient claude CLI failures (rate limit, network,
+  // timeout). Exponential backoff: 2s, 4s. Costs accumulate across attempts —
+  // a transient that already burned tokens still counts toward budget.
+  let cost = 0;
+  let lastReturn: DirectorCallReturn | null = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const r = await callDirectorOnce(args, systemPrompt, turnPrompt);
+    cost += r.cost;
+    if (!r.transient) {
+      lastReturn = { decision: r.decision, cost };
+      break;
+    }
+    if (attempt < 3) {
+      const waitMs = 2000 * attempt;
+      args.emit("system", {
+        msg: `Director: transient claude failure (${r.transient.reason}) — retrying in ${waitMs}ms (attempt ${attempt + 1}/3)`,
+      });
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      continue;
+    }
+    // Final attempt also failed — fall through with whatever decision we got
+    // (likely a give_up "Could not parse"). The run will be marked failed.
+    lastReturn = {
+      decision: {
+        rationale: `Director call failed after 3 attempts (${r.transient.reason})`,
+        action: { action: "give_up", reason: `transient claude failure: ${r.transient.reason}` },
+      },
+      cost,
+    };
+  }
+
+  let { decision } = lastReturn!;
+
+  // Parse-retry: if Director returned unparseable output (not transient), give
+  // it one more shot with a strict reminder. Avoids burning a give_up on a
+  // one-off formatting glitch.
   if (decision.action.action === "give_up" && decision.rationale.startsWith("Could not parse")) {
     args.emit("system", { msg: "Director returned unparseable output — retrying with strict-JSON reminder." });
-    const strictPrompt = buildDirectorTurnPrompt(args, history, budget) +
+    const strictPrompt = turnPrompt +
       "\n\nIMPORTANT: your previous reply was not parseable as JSON. Reply with ONE valid JSON object on the LAST line, no markdown fence required. Nothing after the JSON.";
     const retry = await callDirectorOnce(args, systemPrompt, strictPrompt);
     decision = retry.decision;
@@ -324,6 +669,7 @@ async function callDirectorOnce(
   prompt: string,
 ): Promise<DirectorCallReturn> {
   let stdoutBuf = "";
+  let stderrBuf = "";
   let cost = 0;
   const { promise, cancel } = streamClaude(
     { prompt, systemPrompt, cwd: args.cwd, model: DIRECTOR_MODEL },
@@ -337,12 +683,24 @@ async function callDirectorOnce(
           }
         } catch { /* not JSON */ }
       },
-      onStderr: () => {},
+      onStderr: (chunk) => { stderrBuf += chunk; },
     },
   );
   args.registerCancel(cancel);
-  await promise;
+  const result = await promise;
   args.unregisterCancel();
+
+  const transient = detectTransient(result.exitCode, stderrBuf, stdoutBuf);
+  if (transient) {
+    return {
+      decision: {
+        rationale: `transient claude failure: ${transient.reason}`,
+        action: { action: "give_up", reason: transient.reason },
+      },
+      cost,
+      transient,
+    };
+  }
 
   const parsed = extractJsonWithFallback<DirectorDecision>(stdoutBuf);
   if (!parsed || typeof parsed !== "object" || !("action" in parsed)) {
@@ -375,6 +733,16 @@ function buildDirectorSystemPrompt(subagents: string[], cfg: DirectorConfig, pro
     : subagents.map((s) => `  - ${s}`).join("\n");
 
   const playbook = renderPlaybook(project);
+  const connectors = describeReadableConnectors(project);
+  const connectorSection = connectors.length === 0
+    ? "(no readable connectors configured — fetch_context unavailable)"
+    : connectors.map((c) => `  - **${c.type}**${c.hint ? ` — ${c.hint}` : ""}`).join("\n");
+  const fetchExamples = connectors.length === 0 ? "" : connectors.map((c) => {
+    if (c.type === "jira") return `{ "action": "fetch_context", "connector": "jira", "params": { "key": "DEV-1111" } }`;
+    if (c.type === "github") return `{ "action": "fetch_context", "connector": "github", "params": { "kind": "pr", "repo": "owner/name", "number": 42 } }`;
+    if (c.type === "ssh") return `{ "action": "fetch_context", "connector": "ssh", "params": { "path": "/etc/nginx/nginx.conf" } }`;
+    return "";
+  }).filter(Boolean).map((s) => `  ${s}`).join("\n");
   // Named Playbook registry dropped — used <15% of the time and Director's
   // ad-hoc dispatch chains hit similar cost. Schema kept for back-compat.
   void project;
@@ -405,8 +773,11 @@ The library above is organized by what each skill/gate does, not by step order. 
 
 \`\`\`
 { "action": "dispatch", "subagent": "<name>", "notes": "<concrete instructions>" }
+{ "action": "dispatch_parallel", "targets": [ { "subagent": "<name>", "notes": "..." }, ... ] }
 { "action": "run_playbook_phase", "phase_id": "<skill-or-gate-id>", "notes": "<optional override>" }
 { "action": "run_ci_gate" }
+{ "action": "fetch_context", "connector": "<jira|github|ssh>", "params": { ... } }
+{ "action": "request_human_review", "rationale": "<why you need input>", "question": "<concrete question to user>" }
 { "action": "request_decompose", "reason": "<why split>" }
 { "action": "mark_done", "summary": "<what was delivered>" }
 { "action": "give_up", "reason": "<concrete blocker>" }
@@ -415,6 +786,15 @@ The library above is organized by what each skill/gate does, not by step order. 
 - \`run_playbook_phase\` runs ONE skill/gate from the library with its configured agent and notes. Use when you want the canonical version of a step (e.g. \`ci_gate\`, \`reviewer\`).
 - \`dispatch\` is the most flexible: ad-hoc agent invocation with custom notes — use for novel work or when adapting a known skill to a new context.
 - \`run_ci_gate\` is shorthand for the canonical CI gate.
+- \`dispatch_parallel\` runs 2–4 **read-only** sub-agents (Reviewer, Tester, Lint Gate, Security Reviewer) **concurrently** against the same diff. Use when you want all findings at once instead of fixing iteratively. Code-enforced: targets must have role=reviewer; coders cannot be parallelized (no concurrent worktree writes yet). After the batch returns, the next turn sees ALL verdicts together — quote the relevant findings in the next dispatch's notes.
+- \`fetch_context\` pulls external data into the run from a configured connector. Result lands in your history and is visible on the next turn — quote the relevant parts in the next \`dispatch\` notes so the sub-agent has the context.
+- \`request_human_review\` pauses the run and asks the user a question. **AUTONOMY IS THE DEFAULT** — the user does not want to be asked. Only use this for operations that are **truly irreversible** AND **high-impact**: dropping a table or column that contains data, deleting users / customer records, force-pushing to a protected branch, deploying to production, mass-emailing customers, charging cards. Architectural and design ambiguity is NOT a reason — pick the simplest reasonable default with a 1-line rationale and proceed. The user can rate the run \`bad\` afterward if your choice was wrong; that costs less than blocking the whole chain on a question. If in doubt: do not pause, decide.
+
+### Readable connectors in this project
+${connectorSection}
+
+${fetchExamples ? `Example fetch_context payloads:\n\`\`\`\n${fetchExamples}\n\`\`\`\n` : ""}
+**When to fetch_context:** the ticket references an external ID (JIRA-123, PR #42, a path on the server) but the body in the ticket is thin. ONE fetch per source per run is usually enough — don't loop. If a fetch fails, decide based on the error: missing creds = give_up with a concrete reason; bad params = retry with corrected params; otherwise proceed without it.
 
 ### Available sub-agents for dispatch:
 ${subagentList}
@@ -442,7 +822,10 @@ Read the title + body + episodic memory. Pick ONE bucket:
 ### Closing a run
 
 4. **ci_gate before mark_done — always.** Code-enforced: \`mark_done\` is rejected if no \`ci_gate\` succeeded earlier in this run. After fixes, re-run ci_gate.
-5. **Reviewer / Closer are not always required** — for trivial tickets, Junior + ci_gate + Closer (light sign-off) is enough. For everything else, Reviewer between code and ci_gate is a strong default.
+5. **Reviewer is REQUIRED before mark_done unless the ticket is trivial.** Before \`mark_done\`, run through this checklist:
+   - Did a Reviewer pass on the latest code? If no AND ticket is non-trivial → dispatch Reviewer first.
+   - **Mandatory Reviewer triggers (no exceptions):** authentication / authorization, session handling, password / token / secret handling, payments or money movement, permission boundaries, data migration, schema change, deletion of user data, anything touching security headers / CSRF / CORS / SQL queries with user input.
+   - **Trivial = Reviewer optional:** typo fix, copy / string change, single-line config tweak, dependency bump with no API change, rename within one file. When in doubt, run Reviewer — one extra turn is cheaper than a regression.
 6. **Tester** runs automated tests separately from ci_gate; use it when ci_gate doesn't already exercise the test suite.
 
 ### Notes & dispatch quality
@@ -573,6 +956,9 @@ function formatDecision(d: DirectorDecision): string {
   if (a.action === "mark_done") act = `mark_done: ${a.summary.slice(0, 100)}`;
   if (a.action === "give_up") act = `give_up: ${a.reason.slice(0, 100)}`;
   if (a.action === "request_decompose") act = `request_decompose: ${a.reason.slice(0, 100)}`;
+  if (a.action === "fetch_context") act = `fetch_context ${a.connector}: ${JSON.stringify(a.params).slice(0, 100)}`;
+  if (a.action === "request_human_review") act = `request_human_review: ${a.question.slice(0, 100)}`;
+  if (a.action === "dispatch_parallel") act = `dispatch_parallel [${a.targets.map((t) => t.subagent).join(", ")}]`;
   return `${act}  [${d.rationale.slice(0, 100)}]`;
 }
 
@@ -583,6 +969,22 @@ function formatOutcome(o: Outcome): string {
   }
   if (o.kind === "ci_gate") {
     return `ci_gate ok=${o.ok}\n  summary: ${o.summary.slice(0, 150)}\n  tail: ${o.details_tail.slice(0, 300)}`;
+  }
+  if (o.kind === "context_fetched") {
+    if (!o.ok) return `fetch_context ${o.connector} FAILED: ${o.error ?? "(unknown)"}`;
+    // Surface the full content so Director can quote it in the next dispatch.
+    // Cap to 6 KB to bound prompt size; jira/github read methods already truncate at 4 KB body.
+    return `fetch_context ${o.connector} OK:\n${o.content.slice(0, 6000)}`;
+  }
+  if (o.kind === "human_review") {
+    return `human_review ${o.approved ? "APPROVED" : "REJECTED"}${o.note ? `\n  user: ${o.note.slice(0, 1500)}` : ""}`;
+  }
+  if (o.kind === "parallel_dispatch") {
+    const lines = o.results.map((r) => {
+      const issues = r.issues.length > 0 ? ` issues: ${r.issues.slice(0, 3).map((i) => i.message ?? "").join(" / ")}` : "";
+      return `  - [${r.subagent}] ok=${r.ok} cost=$${r.cost_usd.toFixed(2)}${issues}\n    summary: ${r.summary.slice(0, 200)}`;
+    });
+    return `parallel_dispatch all_ok=${o.all_ok} total=$${o.total_cost_usd.toFixed(2)}\n${lines.join("\n")}`;
   }
   return `terminal ${o.status}: ${o.reason}`;
 }
@@ -738,6 +1140,45 @@ async function dispatchSubagent(
 
 // ---- Playbook phase dispatch ------------------------------------------------
 
+/** Run multiple read-only sub-agents concurrently against the same worktree.
+ *  Caller already passed enforceGuardrails so we can assume targets are
+ *  reviewer-role and within caps. dispatchSubagent handles its own per-call
+ *  events; we just await all and aggregate.
+ *
+ *  Race notes: dispatchSubagent updates `runs.agent_role` / `current_agent_name`
+ *  as a side effect, which is fine when one runs at a time. With concurrent
+ *  calls the row reflects whichever finished setting last — acceptable; the
+ *  authoritative source for "what's running" is director_dispatch /
+ *  director_subagent_done events, not the row. */
+async function dispatchParallel(
+  args: DirectorRunArgs,
+  targets: Array<{ subagent: string; notes: string }>,
+): Promise<ParallelDispatchOutcome> {
+  args.emit("director_dispatch", {
+    subagent: "parallel",
+    targets: targets.map((t) => t.subagent),
+  });
+  const results = await Promise.all(
+    targets.map((t) => dispatchSubagent(args, t.subagent, t.notes)),
+  );
+  const total_cost_usd = results.reduce((s, r) => s + r.cost_usd, 0);
+  const all_ok = results.every((r) => r.ok === true);
+  args.emit("director_subagent_done", {
+    subagent: "parallel",
+    ok: all_ok,
+    cost_usd: total_cost_usd,
+    summary: `${results.length} parallel: ${results.map((r) => `${r.subagent}=${r.ok ? "ok" : "fail"}`).join(", ")}`,
+    parallel_results: results.map((r) => ({
+      subagent: r.subagent,
+      ok: r.ok,
+      cost_usd: r.cost_usd,
+      summary: r.summary,
+      issues: r.issues,
+    })),
+  });
+  return { kind: "parallel_dispatch", results, total_cost_usd, all_ok };
+}
+
 async function runPlaybookPhase(
   args: DirectorRunArgs,
   cfg: DirectorConfig,
@@ -794,6 +1235,50 @@ async function runPlaybookPhase(
     commits_added: 0,
     cost_usd: 0,
   };
+}
+
+// ---- fetch_context dispatch -------------------------------------------------
+
+/** Connector summary for the system prompt: which connectors does the project
+ *  have configured (via workflow phases) that also support read()?
+ *  We only advertise readable ones — Director can't fetch from telegram, etc. */
+function describeReadableConnectors(project: ProjectWithRepos): { type: string; hint: string }[] {
+  const phases = project.workflow.phases ?? [];
+  const seen = new Map<string, { type: string; hint: string }>();
+  for (const p of phases) {
+    if (p.kind !== "task" || !p.task) continue;
+    const t = p.task.type;
+    if (t !== "jira" && t !== "github" && t !== "ssh") continue;
+    if (seen.has(t)) continue;
+    let hint = "";
+    if (t === "github") {
+      const cfg = p.task.config as { default_repo?: string };
+      hint = cfg.default_repo ? `default repo: ${cfg.default_repo}` : "";
+    } else if (t === "ssh") {
+      const cfg = p.task.config as { host?: string };
+      hint = cfg.host ? `host: ${cfg.host}` : "";
+    }
+    seen.set(t, { type: t, hint });
+  }
+  return [...seen.values()];
+}
+
+async function fetchContext(
+  args: DirectorRunArgs,
+  action: FetchContextAction,
+): Promise<ContextFetchedOutcome> {
+  args.emit("director_dispatch", {
+    subagent: `fetch_context:${action.connector}`,
+    params: action.params,
+  });
+  const r = await readTask(action.connector, args.project, action.params);
+  args.emit("director_context_fetched", {
+    connector: action.connector,
+    ok: r.ok,
+    content: r.content,
+    error: r.error,
+  });
+  return { kind: "context_fetched", connector: action.connector, ok: r.ok, content: r.content, error: r.error };
 }
 
 // ---- ci_gate dispatch -------------------------------------------------------

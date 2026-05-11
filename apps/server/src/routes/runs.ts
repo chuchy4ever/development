@@ -8,6 +8,8 @@ import {
 } from "../store.js";
 import { cancelRun, decideApproval, deleteRun, listEvents, startRun, subscribeRun } from "../runs.js";
 import { openPullRequests } from "../pr.js";
+import { db, nowIso } from "../db.js";
+import type { RunUserVerdict, SetRunVerdictInput } from "@ceo/shared";
 
 export const runsRouter = Router({ mergeParams: true });
 
@@ -71,6 +73,30 @@ runsRouter.post("/runs/:runId/reject", (req, res) => {
   const ok = decideApproval(req.params.runId, false, note);
   if (!ok) return res.status(409).json({ error: "run is not awaiting approval" });
   res.json(loadRun(req.params.runId));
+});
+
+/** Set / clear a user verdict on a finished run. Idempotent — re-rating
+ *  overwrites. Verdict is consumed by Memory Curator (good runs become
+ *  positive examples, bad/broken_in_prod become anti-patterns) on the next
+ *  Director run in the same project. */
+runsRouter.put("/runs/:runId/verdict", (req, res) => {
+  const run = loadRun(req.params.runId);
+  if (!run) return res.status(404).json({ error: "not found" });
+  if (run.status === "running" || run.status === "pending" || run.status === "awaiting_approval") {
+    return res.status(409).json({ error: `cannot rate a ${run.status} run` });
+  }
+  const body = req.body as SetRunVerdictInput;
+  const verdict = body?.verdict ?? null;
+  if (verdict !== null && !["good", "bad", "broken_in_prod"].includes(verdict)) {
+    return res.status(400).json({ error: 'verdict must be "good" | "bad" | "broken_in_prod" | null' });
+  }
+  const note = typeof body?.note === "string" ? body.note.slice(0, 1000) : null;
+  db.prepare(
+    `UPDATE runs SET user_verdict = ?, user_verdict_at = ?, user_verdict_note = ? WHERE id = ?`,
+  ).run(verdict, verdict ? nowIso() : null, note, req.params.runId);
+  res.json(loadRun(req.params.runId));
+  // Touch verdict so TS sees it used (no-op).
+  void (verdict as RunUserVerdict | null);
 });
 
 runsRouter.delete("/runs/:runId", async (req, res) => {

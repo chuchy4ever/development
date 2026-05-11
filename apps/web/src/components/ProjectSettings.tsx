@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { ProjectWithRepos } from "@ceo/shared";
 import { api } from "../api";
 import { FolderPicker } from "./FolderPicker";
+import { ConnectorSecretsPanel } from "./ConnectorSecretsPanel";
 
 interface Props {
   project: ProjectWithRepos;
@@ -182,6 +183,8 @@ export function ProjectSettings({ project, onChanged, onDeleted }: Props) {
         </div>
       </div>
 
+      <ConnectorSecretsPanel scope={{ scope: "project", projectId: project.id }} />
+
       {err && <div style={{ color: "var(--red)", fontSize: 12, marginBottom: 12 }}>{err}</div>}
 
       <div className="settings-section" style={{ borderColor: "var(--red)" }}>
@@ -208,3 +211,4 @@ export function ProjectSettings({ project, onChanged, onDeleted }: Props) {
     </div>
   );
 }
+

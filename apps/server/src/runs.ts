@@ -22,8 +22,9 @@ import { buildRunClaudeMd, writeRunClaudeMd } from "./runClaudeMd.js";
 import { applyMemoryUpdate, readAgentMemory } from "./agentMemory.js";
 import { applyProjectMemoryUpdate } from "./projectMemory.js";
 import { runAgentOneShot } from "./oneShot.js";
+import { extractCostFromStdout, recordCost } from "./costLog.js";
 import { extractJsonWithFallback } from "./jsonUtil.js";
-import { runTask } from "./tasks/index.js";
+import { runTask, CONNECTOR_TASK_TYPES } from "./tasks/index.js";
 import { normalizePhase } from "@ceo/shared";
 
 /** Per-run event emitter. SSE handlers subscribe; engine emits. */
@@ -394,6 +395,27 @@ async function executeRun(args: {
           db.prepare(`UPDATE runs SET total_cost_usd = ? WHERE id = ?`)
             .run(totalCostUsd, runId);
         }
+        // Pause-instead-of-fail: Director hit its budget but has more work to
+        // do. Set the run to awaiting_approval so the user can extend budget
+        // (approve) or cancel (reject) via decideApproval. We DON'T emit
+        // phase_end — the phase isn't ending, it's being suspended.
+        if (result.paused) {
+          const pauseReason = result.paused.reason;
+          const message = pauseReason === "budget_exhausted"
+            ? `Director paused: budget $${result.paused.budget_usd.toFixed(2)} exhausted at $${result.total_cost_usd.toFixed(2)}. Approve to extend budget by ~50% and resume; reject to cancel the run.`
+            : `Director needs your input: ${result.paused.question}\n\n(${result.paused.rationale})`;
+          emit(runId, "awaiting_approval", {
+            phase_id: displayPhaseId,
+            pause_reason: pauseReason,
+            message,
+            ...(pauseReason === "human_review" ? { question: result.paused.question, rationale: result.paused.rationale } : {}),
+          });
+          db.prepare(
+            `UPDATE runs SET status = 'awaiting_approval', current_phase_id = ?, pause_reason = ? WHERE id = ?`,
+          ).run(displayPhaseId, pauseReason, runId);
+          return; // exit cleanly — decideApproval restarts.
+        }
+
         emit(runId, "phase_end", {
           role: "director",
           phase_id: phase.id,
@@ -403,6 +425,20 @@ async function executeRun(args: {
           iterations: result.iterations,
           total_cost_usd: result.total_cost_usd,
           decomposed: result.decomposed,
+        });
+
+        // Fire workflow hooks (on_success / on_failure). These are connector
+        // task phases (jira/github/ssh/telegram) that the user wired in for
+        // reporting / handoff. They run sequentially; a hook failure is logged
+        // but doesn't fail the run.
+        await fireWorkflowHooks({
+          runId,
+          project,
+          ticket,
+          worktrees,
+          cwd,
+          ok: result.ok,
+          lastVerdict,
         });
 
         if (!result.ok) lastFailedVerdict = lastVerdict;
@@ -816,28 +852,17 @@ Rules:
       void runMemoryCuratorSafely({ runId, project, ticket, diffs, cwd });
     }
 
-    // If the workflow ended with a Closer agent that returned ok=true, the
-    // team has self-certified the work and the ticket is fully done. Otherwise
-    // it lands in 'review' for a human to look at.
-    let ticketStatus: "done" | "review" | "blocked";
-    if (finalStatus === "succeeded") {
-      const lastPhaseAgent = phase ? null : (() => {
-        // We finished — `phase` is undefined; look at the last verdict's source.
-        // We can determine "closer-approved" by inspecting if the last successful
-        // verdict came from an agent named "Closer".
-        return null;
-      })();
-      // Simpler: check last verdict + last agent name directly.
-      const lastAgentRow = db.prepare("SELECT current_agent_name FROM runs WHERE id = ?")
-        .get(runId) as { current_agent_name: string | null } | undefined;
-      const closerApproved =
-        lastAgentRow?.current_agent_name === AGENT_NAMES.CLOSER &&
-        lastVerdict && (lastVerdict as any).ok !== false;
-      ticketStatus = closerApproved ? "done" : "review";
-      void lastPhaseAgent;
-    } else {
-      ticketStatus = "blocked";
-    }
+    // Auto-finalize succeeded runs to `done`. Director already enforces ci_gate
+    // (code-level guardrail) and runs Reviewer / Tester before mark_done on
+    // non-trivial work — by the time we reach finalStatus='succeeded' the team
+    // has self-certified. Manual review-then-done step would block the
+    // dependency chain (next subticket can't start until prior is `done`) for
+    // little safety gain. Failed runs still go to `blocked` for human triage.
+    //
+    // If the user marks the run with verdict='bad' / 'broken_in_prod' later,
+    // Memory Curator surfaces it as anti-pattern in episodic memory — that's
+    // the feedback loop, not pre-blocking the chain.
+    const ticketStatus: "done" | "blocked" = finalStatus === "succeeded" ? "done" : "blocked";
     db.prepare(`UPDATE tickets SET status = ?, updated_at = ? WHERE id = ?`)
       .run(ticketStatus, nowIso(), ticket.id);
 
@@ -952,8 +977,11 @@ export async function cleanupRunArtifacts(runId: string): Promise<boolean> {
   return removedAny;
 }
 
-/** Periodic cleanup: drop worktrees for cancelled (>12h) and failed (>7d) runs.
- *  Succeeded runs are kept until manual delete (the user may still want to push). */
+/** Periodic cleanup: drop worktrees for cancelled (>12h), failed (>7d), and
+ *  succeeded (>30d) runs. Succeeded gets the longest grace period because
+ *  the user might still want to push from the worktree shortly after — but
+ *  after a month the merge has typically happened and the worktree is just
+ *  disk bloat. The run row itself stays (event log, cost, verdict). */
 export async function cleanupOldRunArtifacts(): Promise<{ cleaned: number }> {
   const targets = db
     .prepare(
@@ -964,6 +992,8 @@ export async function cleanupOldRunArtifacts(): Promise<{ cleaned: number }> {
             (status = 'cancelled' AND finished_at IS NOT NULL AND finished_at < datetime('now', '-12 hours'))
             OR
             (status = 'failed'    AND finished_at IS NOT NULL AND finished_at < datetime('now', '-7 days'))
+            OR
+            (status = 'succeeded' AND finished_at IS NOT NULL AND finished_at < datetime('now', '-30 days'))
           )`,
     )
     .all() as { id: string }[];
@@ -1057,6 +1087,12 @@ Decide. Most runs should add nothing. End with the JSON object as specified in y
     emit(runId, "system", { msg: `Memory Curator failed: ${e.message ?? e}` });
     return;
   }
+  recordCost({
+    source: "memory_curator",
+    cost_usd: extractCostFromStdout(res.stdout),
+    project_id: project.id,
+    run_id: runId,
+  });
 
   const parsed = extractJsonWithFallback<{
     rationale?: string;
@@ -1119,6 +1155,7 @@ function buildRecentRunsContext(projectId: string, excludeRunId: string): string
   const rows = db
     .prepare(
       `SELECT r.id AS run_id, r.finished_at,
+              r.user_verdict, r.user_verdict_note,
               t.ticket_key AS ticket_key, t.title AS ticket_title
          FROM runs r
          LEFT JOIN tickets t ON t.id = r.ticket_id
@@ -1132,18 +1169,61 @@ function buildRecentRunsContext(projectId: string, excludeRunId: string): string
     .all(projectId, excludeRunId) as Array<{
       run_id: string;
       finished_at: string;
+      user_verdict: string | null;
+      user_verdict_note: string | null;
       ticket_key: string | null;
       ticket_title: string | null;
     }>;
-  if (rows.length === 0) return null;
+  // Independent pull of negatively-rated runs (regardless of run status — a
+  // bad/broken_in_prod run might have been technically `succeeded` or `failed`,
+  // doesn't matter, the user said it was wrong). These become explicit
+  // anti-pattern lines so the Director / sub-agents avoid repeating mistakes.
+  const negativeRows = db
+    .prepare(
+      `SELECT r.id AS run_id, r.finished_at, r.user_verdict, r.user_verdict_note,
+              t.ticket_key AS ticket_key, t.title AS ticket_title
+         FROM runs r
+         LEFT JOIN tickets t ON t.id = r.ticket_id
+        WHERE r.project_id = ?
+          AND r.id != ?
+          AND r.user_verdict IN ('bad', 'broken_in_prod')
+        ORDER BY r.user_verdict_at DESC
+        LIMIT 3`,
+    )
+    .all(projectId, excludeRunId) as Array<{
+      run_id: string;
+      finished_at: string | null;
+      user_verdict: string | null;
+      user_verdict_note: string | null;
+      ticket_key: string | null;
+      ticket_title: string | null;
+    }>;
 
-  const lines = rows.map((r) => {
-    const key = r.ticket_key ?? r.run_id.slice(0, 6);
-    const title = (r.ticket_title ?? "(no title)").slice(0, 100);
-    const when = relativeWhen(r.finished_at);
-    return `- **${key}** ${title} _(finished ${when})_`;
-  });
-  return lines.join("\n");
+  const sections: string[] = [];
+
+  if (rows.length > 0) {
+    const lines = rows.map((r) => {
+      const key = r.ticket_key ?? r.run_id.slice(0, 6);
+      const title = (r.ticket_title ?? "(no title)").slice(0, 100);
+      const when = r.finished_at ? relativeWhen(r.finished_at) : "?";
+      const verdictTag = r.user_verdict === "good" ? " ✓ user-approved" : "";
+      return `- **${key}** ${title} _(finished ${when}${verdictTag})_`;
+    });
+    sections.push(lines.join("\n"));
+  }
+
+  if (negativeRows.length > 0) {
+    const antiLines = negativeRows.map((r) => {
+      const key = r.ticket_key ?? r.run_id.slice(0, 6);
+      const title = (r.ticket_title ?? "(no title)").slice(0, 100);
+      const tag = r.user_verdict === "broken_in_prod" ? "broken in production" : "user-rejected";
+      const note = r.user_verdict_note ? ` — ${r.user_verdict_note.slice(0, 200)}` : "";
+      return `- **${key}** ${title} _(${tag})_${note}`;
+    });
+    sections.push(`### Avoid repeating these (anti-patterns)\n${antiLines.join("\n")}`);
+  }
+
+  return sections.length > 0 ? sections.join("\n\n") : null;
 }
 
 function relativeWhen(iso: string): string {
@@ -1317,6 +1397,19 @@ export function decideApproval(runId: string, approve: boolean, note?: string): 
 
   const phases = project.workflow.phases;
   const current = phases.find((p) => p.id === run.current_phase_id);
+
+  // Director pause-resume path: current_phase_id is the director phase id (or
+  // the "director" display id for the implicit one). The implicit director
+  // isn't in phases[] so `current` is undefined — handle before the missing-
+  // phase guard would mark this run failed.
+  const isDirectorPause =
+    run.current_phase_id === "director" ||
+    run.current_phase_id === "__director__" ||
+    current?.kind === "director";
+  if (isDirectorPause) {
+    return decideDirectorPause(runId, run, project, ticket, approve, note);
+  }
+
   if (!current) {
     markFailed(runId, ticket.id, "approval: current phase missing");
     return false;
@@ -1393,6 +1486,146 @@ export function decideApproval(runId: string, approve: boolean, note?: string): 
   markFailed(runId, ticket.id, `approval: rejected${note ? ` (${note})` : ""}`);
   emit(runId, "done", { status: "failed", error: `approval rejected${note ? `: ${note}` : ""}` });
   return true;
+}
+
+/** Director pause-resume: approve = extend budget by ~50% and resume the
+ *  Director phase; reject = cancel the run. The status transition to 'running'
+ *  has already been applied atomically by decideApproval(). */
+function decideDirectorPause(
+  runId: string,
+  run: Run,
+  project: ProjectWithRepos,
+  ticket: Ticket,
+  approve: boolean,
+  note: string | undefined,
+): boolean {
+  const repoMap = new Map(project.repos.map((r) => [r.name, r]));
+  const worktrees = run.worktrees
+    .map((w) => {
+      const repo = repoMap.get(w.repo_name);
+      if (!repo) return null;
+      return { repo_name: w.repo_name, repo_path: repo.local_path, base_branch: repo.default_branch, path: w.path };
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null);
+  if (worktrees.length === 0) {
+    markFailed(runId, ticket.id, "director resume: no usable worktrees");
+    return false;
+  }
+
+  // Pause reason determines resume semantics — set when the director paused.
+  const pauseRow = db
+    .prepare(`SELECT pause_reason FROM runs WHERE id = ?`)
+    .get(runId) as { pause_reason: string | null } | undefined;
+  const pauseReason = pauseRow?.pause_reason ?? "budget_exhausted";
+
+  if (!approve) {
+    db.prepare(
+      `UPDATE runs SET status = 'cancelled', finished_at = ?, error = ?, pause_reason = NULL WHERE id = ?`,
+    ).run(nowIso(), `cancelled: ${pauseReason === "human_review" ? "human_review rejected" : "budget extension rejected"}${note ? ` (${note})` : ""}`, runId);
+    db.prepare(`UPDATE tickets SET status = 'blocked', updated_at = ? WHERE id = ?`)
+      .run(nowIso(), ticket.id);
+    if (pauseReason === "human_review") {
+      // Persist the rejection so director's history rebuild on a hypothetical
+      // restart sees the resolved event (also gives an audit trail).
+      emit(runId, "director_human_review_resolved", { approved: false, note: note ?? "" });
+    }
+    emit(runId, "system", { msg: `Director paused — rejected${note ? ` (${note})` : ""}. Run cancelled.` });
+    emit(runId, "done", { status: "cancelled", error: `cancelled by user${note ? `: ${note}` : ""}` });
+    return true;
+  }
+
+  // Approve path. Behavior depends on why we paused.
+  if (pauseReason === "human_review") {
+    // No budget change; just record the user's answer so director sees it on
+    // the next turn, then resume.
+    emit(runId, "director_human_review_resolved", { approved: true, note: note ?? "" });
+    emit(runId, "system", {
+      msg: `Director resuming with user input${note ? `: ${note}` : " (no note)"}.`,
+    });
+    db.prepare(`UPDATE runs SET pause_reason = NULL WHERE id = ?`).run(runId);
+  } else {
+    // Budget pause: extend by 50% with $5 floor so a tiny initial budget still
+    // gains real headroom.
+    const overrideRow = db
+      .prepare(`SELECT director_budget_override_usd FROM runs WHERE id = ?`)
+      .get(runId) as { director_budget_override_usd: number | null } | undefined;
+    const projectBudget = project.workflow.director_config?.budget_usd ?? null;
+    const currentBudget = overrideRow?.director_budget_override_usd ?? projectBudget ?? 20;
+    const extension = Math.max(5, Math.round(currentBudget * 0.5));
+    const newBudget = currentBudget + extension;
+    db.prepare(`UPDATE runs SET director_budget_override_usd = ?, pause_reason = NULL WHERE id = ?`)
+      .run(newBudget, runId);
+    emit(runId, "system", {
+      msg: `Director budget extended: $${currentBudget.toFixed(2)} → $${newBudget.toFixed(2)} (+$${extension}). Resuming.`,
+    });
+  }
+
+  // Re-enter the Director phase. History is rebuilt from events inside
+  // runDirectorPhase, so we don't need to pass any resume state — but we DO
+  // need startPhaseId to bypass the default first-phase entry.
+  void executeRun({
+    runId,
+    ticket,
+    project,
+    worktrees,
+    branch: run.branch,
+    resume: { startPhaseId: run.current_phase_id ?? "director" },
+  });
+  return true;
+}
+
+/** Fire all connector phases after a Director run terminates. Each connector
+ *  task internally filters its actions by trigger (`on: always|success|failure`)
+ *  vs the run outcome — the engine just runs them; the task decides what
+ *  (if anything) to do. Hook failures are logged, never fail the run. */
+async function fireWorkflowHooks(args: {
+  runId: string;
+  project: ProjectWithRepos;
+  ticket: Ticket;
+  worktrees: { repo_name: string; repo_path: string; base_branch: string; path: string }[];
+  cwd: string;
+  ok: boolean;
+  lastVerdict: ReviewVerdict | TestVerdict | null;
+}): Promise<void> {
+  const { runId, project, ticket, cwd, ok, lastVerdict } = args;
+  const wf = project.workflow;
+
+  // Connector phases auto-fire at terminal — no opt-in needed. Each phase's
+  // task config carries its own per-action `on` triggers.
+  const connectorPhases = wf.phases
+    .map((p) => normalizePhase(p))
+    .filter((p) => p.kind === "task" && p.task && CONNECTOR_TASK_TYPES.has(p.task.type));
+
+  if (connectorPhases.length === 0) return;
+
+  for (const phase of connectorPhases) {
+    if (!phase.task) continue;
+    emit(runId, "phase_start", { role: "hook", phase_id: phase.id, hook_type: ok ? "on_success" : "on_failure" });
+    const taskCtx = {
+      runId,
+      runDir: cwd,
+      project,
+      ticket,
+      phase,
+      lastVerdict,
+      lastWasFailure: !ok,
+      emit: (event: string, payload: Record<string, unknown>) => emit(runId, event as RunEventType, payload),
+      registerCancel: (c: () => void) => cancelHandles.set(runId, c),
+      unregisterCancel: () => cancelHandles.delete(runId),
+    };
+    try {
+      const verdict = await runTask(phase.task.type, phase.task.config, taskCtx);
+      emit(runId, "phase_end", {
+        role: "hook",
+        phase_id: phase.id,
+        exit_code: verdict.ok ? 0 : 1,
+        verdict,
+      });
+    } catch (e: unknown) {
+      const m = e instanceof Error ? e.message : String(e);
+      emit(runId, "system", { msg: `[hooks] "${phase.id}" threw: ${m}` });
+    }
+  }
 }
 
 function markFailed(runId: string, ticketId: string | undefined, reason: string) {

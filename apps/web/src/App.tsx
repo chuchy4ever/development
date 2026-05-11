@@ -5,6 +5,7 @@ import { Sidebar } from "./components/Sidebar";
 import { ProjectView } from "./components/ProjectView";
 import { CreateProjectModal } from "./components/CreateProjectModal";
 import { AdminView } from "./components/AdminView";
+import { NotificationsBell } from "./components/NotificationsBell";
 import { useRoute } from "./router";
 
 export function App() {
@@ -42,6 +43,7 @@ export function App() {
 
   return (
     <div className="app">
+      <NotificationsBell projects={projects} />
       <Sidebar
         projects={projects}
         activeId={route.projectId}

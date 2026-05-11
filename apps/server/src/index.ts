@@ -13,6 +13,8 @@ import { backfillAllProjects } from "./seedAgents.js";
 import { backfillTicketKeys } from "./backfillTicketKeys.js";
 import { cleanupOldRunArtifacts, resumeOrphanedRuns } from "./runs.js";
 import { startTelegramBot } from "./telegramBot.js";
+import { jobsRouter, jobRunsRouter } from "./routes/jobs.js";
+import { startScheduledJobs, pruneOldJobRuns } from "./scheduledJobs.js";
 
 const app = express();
 app.use(cors());
@@ -31,15 +33,24 @@ app.use("/api/admin", adminRouter);
 app.use("/api/projects/:projectId", projectSaveAsTemplateRouter);
 app.use("/api", runsRouter);
 app.use("/api/scheduler", schedulerRouter);
+app.use("/api/jobs", jobsRouter);
+app.use("/api/job-runs", jobRunsRouter);
 
 backfillAllProjects();
 backfillTicketKeys();
 void resumeOrphanedRuns();
 startScheduler();
+startScheduledJobs();
 
 // Periodic worktree cleanup: cancelled runs older than 12h, failed older than 7d.
 void cleanupOldRunArtifacts();
 setInterval(() => { void cleanupOldRunArtifacts(); }, 6 * 60 * 60 * 1000); // every 6h
+
+// Daily prune of job_runs (90-day retention). Watch jobs at 30s ticks can
+// produce thousands of rows/day; without this the table + details_json blob
+// grow unbounded.
+pruneOldJobRuns();
+setInterval(() => { pruneOldJobRuns(); }, 24 * 60 * 60 * 1000);
 
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error("[server error]", err);

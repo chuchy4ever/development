@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
-export type Tab = "board" | "agents" | "workflow" | "memory" | "settings";
-export type AdminSection = "overview" | "templates" | "activity";
+export type Tab = "board" | "agents" | "workflow" | "memory" | "jobs" | "settings";
+export type AdminSection = "overview" | "templates" | "activity" | "jobs" | "jobruns" | "connectors";
 
 export interface Route {
   view: "project" | "admin";
@@ -23,7 +23,7 @@ function parseHash(hash: string): Route {
   const path = hash.replace(/^#/, "").replace(/^\/+/, "/");
 
   // Admin
-  const adm = path.match(/^\/admin(?:\/(overview|templates|activity))?\/?$/);
+  const adm = path.match(/^\/admin(?:\/(overview|templates|activity|jobs|jobruns|connectors))?\/?$/);
   if (adm) {
     return {
       ...DEFAULT,
@@ -34,7 +34,7 @@ function parseHash(hash: string): Route {
 
   // Project
   const m = path.match(
-    /^\/projects\/([^/]+)(?:\/(board|agents|workflow|memory|settings))?(?:\/tickets\/([^/]+))?\/?$/,
+    /^\/projects\/([^/]+)(?:\/(board|agents|workflow|memory|jobs|settings))?(?:\/tickets\/([^/]+))?\/?$/,
   );
   if (m) {
     return {

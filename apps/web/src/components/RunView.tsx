@@ -188,6 +188,26 @@ export function RunView({ runId, onClose }: Props) {
     }
   }
 
+  async function handleSetVerdict(verdict: import("@ceo/shared").RunUserVerdict | null) {
+    setActionBusy(true);
+    setActionMsg(null);
+    try {
+      let note: string | null = null;
+      if (verdict === "bad" || verdict === "broken_in_prod") {
+        note = prompt(verdict === "broken_in_prod"
+          ? "Co se rozbilo v produkci? (zobrazí se v episodic memory pro budoucí runy)"
+          : "Co bylo špatně? (zobrazí se v episodic memory)") ?? "";
+        if (note === null) { setActionBusy(false); return; }
+      }
+      const r = await api.setRunVerdict(runId, verdict, note ?? undefined);
+      setRun(r);
+    } catch (e: any) {
+      setActionMsg(`Verdict failed: ${e.message}`);
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div
@@ -298,6 +318,10 @@ export function RunView({ runId, onClose }: Props) {
               </button>
             </div>
           </div>
+        )}
+
+        {run && (run.status === "succeeded" || run.status === "failed") && (
+          <VerdictBar run={run} busy={actionBusy} onSet={handleSetVerdict} />
         )}
 
         {events.length > 0 && <TeamFlowHeader events={events} />}
@@ -907,6 +931,60 @@ function DiffView({ diffs }: { diffs: UiEvent[] }) {
           }}>{d.payload?.diff || "(no changes)"}</pre>
         </div>
       ))}
+    </div>
+  );
+}
+
+/** Three-button verdict bar shown on completed runs. The chosen verdict
+ *  highlights; clicking again clears it. Bad / broken_in_prod prompt for a
+ *  short note that becomes part of the project's episodic memory anti-pattern
+ *  list. */
+function VerdictBar({
+  run, busy, onSet,
+}: {
+  run: Run;
+  busy: boolean;
+  onSet: (v: import("@ceo/shared").RunUserVerdict | null) => void;
+}) {
+  const v = run.user_verdict;
+  const btn = (label: string, value: import("@ceo/shared").RunUserVerdict, color: string) => (
+    <button
+      disabled={busy}
+      onClick={() => onSet(v === value ? null : value)}
+      style={{
+        padding: "4px 10px",
+        fontSize: 12,
+        background: v === value ? color : "transparent",
+        color: v === value ? "white" : color,
+        border: `1px solid ${color}`,
+        borderRadius: 6,
+        cursor: busy ? "wait" : "pointer",
+      }}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div style={{
+      marginTop: 12,
+      display: "flex",
+      gap: 8,
+      alignItems: "center",
+      padding: "8px 10px",
+      background: "var(--bg-elevated)",
+      border: "1px solid var(--border)",
+      borderRadius: 6,
+      fontSize: 12,
+    }}>
+      <span style={{ color: "var(--text-dim)" }}>Tvůj verdikt:</span>
+      {btn("✓ Funguje", "good", "#16a34a")}
+      {btn("✗ Špatně", "bad", "#dc2626")}
+      {btn("⚠ Rozbilo se v produkci", "broken_in_prod", "#b91c1c")}
+      {run.user_verdict_note && (
+        <span style={{ color: "var(--text-dim)", fontStyle: "italic", marginLeft: 8 }}>
+          „{run.user_verdict_note.slice(0, 120)}{run.user_verdict_note.length > 120 ? "…" : ""}"
+        </span>
+      )}
     </div>
   );
 }

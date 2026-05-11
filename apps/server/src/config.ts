@@ -38,6 +38,11 @@ export const TELEGRAM_DEFAULT_PLAYBOOK = process.env.TELEGRAM_DEFAULT_PLAYBOOK ?
  *  there; the bot logs the chat id. */
 export const TELEGRAM_OUTPUT_CHAT_ID = process.env.TELEGRAM_OUTPUT_CHAT_ID ?? "";
 
+// Connector secrets are project-scoped (see projectSecrets.ts). Env vars with
+// matching names (GITHUB_TOKEN, JIRA_API_TOKEN, SSH_KEY_PATH, ...) are still
+// honored as fallbacks when a project doesn't set its own value — convenient
+// for single-project deployments and CI/dev setups.
+
 export function ensureDirs() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.mkdirSync(PROJECTS_DIR, { recursive: true });

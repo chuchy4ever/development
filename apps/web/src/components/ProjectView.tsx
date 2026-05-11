@@ -10,6 +10,7 @@ import { ProjectSettings } from "./ProjectSettings";
 import { InboxForm } from "./InboxForm";
 import { TicketModal } from "./TicketModal";
 import { SchedulerBar } from "./SchedulerBar";
+import { JobsAdmin } from "./JobsAdmin";
 import { BulkImportModal } from "./BulkImportModal";
 // WorkflowEditor pulls in ReactFlow (~150 KB gz). Lazy-load it so users who
 // only ever look at the Board tab don't pay for it.
@@ -128,6 +129,14 @@ export function ProjectView({ project, route, navigate, onChanged, onDeleted }: 
         </button>
         <button
           role="tab"
+          aria-selected={tab === "jobs"}
+          className={`tab tab-button ${tab === "jobs" ? "active" : ""}`}
+          onClick={() => setTab("jobs")}
+        >
+          Plánované úlohy
+        </button>
+        <button
+          role="tab"
           aria-selected={tab === "settings"}
           className={`tab tab-button ${tab === "settings" ? "active" : ""}`}
           onClick={() => setTab("settings")}
@@ -170,6 +179,9 @@ export function ProjectView({ project, route, navigate, onChanged, onDeleted }: 
           </Suspense>
         )}
         {tab === "memory" && <MemoryView project={project} />}
+        {tab === "jobs" && (
+          <JobsAdmin projects={[project]} projectId={project.id} />
+        )}
         {tab === "settings" && (
           <ProjectSettings
             project={project}

@@ -81,6 +81,9 @@ interface RunRow {
   exit_code: number | null;
   error: string | null;
   total_cost_usd: number | null;
+  user_verdict: string | null;
+  user_verdict_at: string | null;
+  user_verdict_note: string | null;
   created_at: string;
 }
 
@@ -102,7 +105,12 @@ export const toProject = (r: ProjectRow): Project => ({
 });
 
 export function todaysCostForProject(projectId: string): number {
-  const row = db
+  // Sum from runs.total_cost_usd (Director + sub-agent + run-context bumps
+  // from CTO / Memory Curator) AND from cost_log entries that aren't tied to
+  // a run (Triage, extract-from-spec, review_pr). cost_log entries with a
+  // run_id are already reflected in runs.total_cost_usd via recordCost — so
+  // we filter `run_id IS NULL` to avoid double-counting.
+  const runs = db
     .prepare(`
       SELECT COALESCE(SUM(total_cost_usd), 0) AS s
         FROM runs
@@ -110,7 +118,16 @@ export function todaysCostForProject(projectId: string): number {
          AND date(created_at) = date('now')
     `)
     .get(projectId) as { s: number };
-  return row.s || 0;
+  const extras = db
+    .prepare(`
+      SELECT COALESCE(SUM(cost_usd), 0) AS s
+        FROM cost_log
+       WHERE project_id = ?
+         AND run_id IS NULL
+         AND date(created_at) = date('now')
+    `)
+    .get(projectId) as { s: number };
+  return (runs.s || 0) + (extras.s || 0);
 }
 
 function parseWorkflow(s: string | null | undefined): WorkflowDefinition {
@@ -204,6 +221,9 @@ export const toRun = (r: RunRow): Run => ({
   exit_code: r.exit_code,
   error: r.error,
   total_cost_usd: r.total_cost_usd,
+  user_verdict: (r.user_verdict as Run["user_verdict"]) ?? null,
+  user_verdict_at: r.user_verdict_at ?? null,
+  user_verdict_note: r.user_verdict_note ?? null,
   created_at: r.created_at,
 });
 

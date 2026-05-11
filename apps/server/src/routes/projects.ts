@@ -15,6 +15,9 @@ import { defaultWorkflowForProject, ensureDefaultAgents } from "../seedAgents.js
 import { readMemory, writeMemory } from "../projectMemory.js";
 import { computeKeyPrefix } from "../ticketKey.js";
 import type { CreateProjectInput, CreateRepoInput } from "@ceo/shared";
+import { listProjectSecretsMasked, setProjectSecret, deleteProjectSecret, getProjectSecret } from "../projectSecrets.js";
+import { getGlobalSecret } from "../globalSecrets.js";
+import { testConnector, listConnectorHealth } from "../connectorTests.js";
 
 export const projectsRouter = Router();
 
@@ -372,6 +375,66 @@ projectsRouter.get("/:id/stats", (req, res) => {
     tickets_total,
     estimated_saved_hours: +(succeeded * 1.5).toFixed(1),
   });
+});
+
+// ---- Connector secrets / config (per-project) -----------------------------
+
+projectsRouter.get("/:id/secrets", (req, res) => {
+  const project = loadProjectWithRepos(req.params.id);
+  if (!project) return res.status(404).json({ error: "project not found" });
+  res.json(listProjectSecretsMasked(req.params.id));
+});
+
+projectsRouter.put("/:id/secrets/:key", (req, res) => {
+  const project = loadProjectWithRepos(req.params.id);
+  if (!project) return res.status(404).json({ error: "project not found" });
+  const value = String(req.body?.value ?? "");
+  try {
+    setProjectSecret(req.params.id, req.params.key, value);
+    res.json(listProjectSecretsMasked(req.params.id));
+  } catch (e: unknown) {
+    res.status(400).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+projectsRouter.delete("/:id/secrets/:key", (req, res) => {
+  const project = loadProjectWithRepos(req.params.id);
+  if (!project) return res.status(404).json({ error: "project not found" });
+  deleteProjectSecret(req.params.id, req.params.key);
+  res.json(listProjectSecretsMasked(req.params.id));
+});
+
+/** Copy a single default (admin-level) secret value into this project. The
+ *  plaintext never leaves the server — UI just sends the key, server reads
+ *  global_secrets and writes project_secrets in one call. */
+projectsRouter.post("/:id/secrets/:key/copy-from-default", (req, res) => {
+  const project = loadProjectWithRepos(req.params.id);
+  if (!project) return res.status(404).json({ error: "project not found" });
+  try {
+    const value = getGlobalSecret(req.params.key);
+    if (!value) return res.status(400).json({ error: `default secret "${req.params.key}" is not set` });
+    setProjectSecret(req.params.id, req.params.key, value);
+    res.json(listProjectSecretsMasked(req.params.id));
+  } catch (e: unknown) {
+    res.status(400).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+projectsRouter.post("/:id/secrets/:group/test", async (req, res) => {
+  const project = loadProjectWithRepos(req.params.id);
+  if (!project) return res.status(404).json({ error: "project not found" });
+  try {
+    const result = await testConnector(req.params.group, (k) => getProjectSecret(req.params.id, k), req.params.id);
+    res.json(result);
+  } catch (e: unknown) {
+    res.status(500).json({ ok: false, message: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+projectsRouter.get("/:id/connector-health", (req, res) => {
+  const project = loadProjectWithRepos(req.params.id);
+  if (!project) return res.status(404).json({ error: "project not found" });
+  res.json(listConnectorHealth(req.params.id));
 });
 
 projectsRouter.delete("/:id/repos/:repoId", (req, res) => {

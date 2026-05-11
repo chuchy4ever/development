@@ -92,6 +92,10 @@ export interface SchedulerStatus {
   active_runs: number;
   max_concurrent: number;
   queue_depth: number;
+  /** When set, scheduler auto-pauses (stops starting new runs) at this ISO
+   *  timestamp. In-flight runs drain naturally. Cleared on manual mode change
+   *  or when the deadline fires. */
+  pause_after: string | null;
 }
 
 export type RunStatus =
@@ -101,6 +105,11 @@ export type RunStatus =
   | "succeeded"
   | "failed"
   | "cancelled";
+
+/** User-supplied quality verdict on a completed run. Drives the feedback loop:
+ *  Memory Curator surfaces "bad" / "broken_in_prod" as anti-patterns in the
+ *  episodic memory passed to future Director runs. */
+export type RunUserVerdict = "good" | "bad" | "broken_in_prod";
 
 export interface Run {
   id: string;
@@ -117,7 +126,31 @@ export interface Run {
   exit_code: number | null;
   error: string | null;
   total_cost_usd: number | null;
+  /** Optional user-supplied verdict on the completed run. Null = not rated. */
+  user_verdict: RunUserVerdict | null;
+  user_verdict_at: string | null;
+  user_verdict_note: string | null;
   created_at: string;
+}
+
+export interface SetRunVerdictInput {
+  /** Pass null to clear the verdict. */
+  verdict: RunUserVerdict | null;
+  note?: string | null;
+}
+
+/** One stored connection-test result per (scope, connector group). Updated
+ *  every time the user clicks "Test connection". UI uses this to show a
+ *  status badge + last-tested age without re-hitting the connector API. */
+export interface ConnectorHealthRow {
+  /** "global" for admin scope, otherwise project_id. */
+  scope: string;
+  /** "github" | "jira" | "ssh" */
+  group_name: string;
+  last_tested_at: string;
+  ok: boolean;
+  /** Human-readable error message when ok=false; null on success. */
+  error: string | null;
 }
 
 /** Compact view of which agent is currently working on which ticket — used by the board. */
@@ -149,6 +182,9 @@ export type RunEventType =
   | "director_thinking" // director-phase: streamed token delta from Director
   | "director_dispatch" // director-phase: sub-agent / ci_gate invoked
   | "director_subagent_done" // director-phase: sub-agent / ci_gate finished
+  | "director_paused"   // director-phase: pausing for budget or human review
+  | "director_context_fetched" // director-phase: fetched data from connector
+  | "director_human_review_resolved" // director-phase: user answered human-review pause
   | "director_end"      // director-phase: terminated
   | "done";             // terminal event
 
@@ -485,6 +521,13 @@ export interface WorkflowDefinition {
    *  axis from the Skills library — "which team handles this kind of problem?".
    *  Optional — if empty, agents are treated individually. */
   teams?: Team[];
+  /** Phase IDs (typically connector tasks: jira/github/ssh/telegram) to fire
+   *  after Director marks the run done. Run sequentially in array order; a
+   *  hook failure is logged but doesn't fail the run. */
+  on_success?: string[];
+  /** Phase IDs to fire after Director gives up / hits max iterations / cancels.
+   *  Same semantics as on_success — sequential, non-failing. */
+  on_failure?: string[];
 }
 
 /** A workflow definition that does not yet know agent ids — resolved per-project on read. */
@@ -546,4 +589,274 @@ export interface RunEvent {
   ts: string;
   type: RunEventType;
   payload: string; // JSON-encoded
+}
+
+// ----- Scheduled Jobs --------------------------------------------------------
+
+/**
+ * Job = trigger (when) + action (what). The two are orthogonal:
+ *   - Cron + create_ticket   → "every Monday 9am create a lint ticket"
+ *   - Cron + telegram_digest → "every morning push stats to Telegram"
+ *   - Watch + create_ticket  → "when a new PR is review-requested → ticket"
+ *
+ * Connector secrets (github_token / jira_* / ssh_*) live on the project; both
+ * triggers and actions reference them via project_id and pull from
+ * project_secrets — neither owns credentials.
+ */
+
+// ---- Triggers ---------------------------------------------------------------
+
+/** Cron-based: fires on a fixed schedule, action runs unconditionally. */
+export interface CronTrigger {
+  type: "cron";
+  /** 5-field cron expression OR "@once:<ISO timestamp>" for one-shot. */
+  schedule: string;
+}
+
+/** Polls an external source via the project's connector secrets, dedupes by
+ *  stable IDs persisted in the job state, and fires the action ONCE per new
+ *  item observed. First poll establishes a baseline (no fire). */
+export interface WatchTrigger {
+  type: "watch";
+  /** Which connector to poll. Credentials come from project secrets. */
+  source: "github" | "jira";
+  /** Source-specific query.
+   *   github: GitHub search syntax, e.g. "is:pr review-requested:@me"
+   *   jira:   JQL, e.g. "assignee = currentUser() AND status = 'To Do'" */
+  query: string;
+  /** Cron expression for poll interval (e.g. "* /5 * * * *" → every 5 min). */
+  poll_schedule: string;
+}
+
+export type ScheduledJobTrigger = CronTrigger | WatchTrigger;
+
+// ---- Actions ----------------------------------------------------------------
+
+/** Create a ticket in the job's project. When auto_start, immediately starts a
+ *  Director run. Templates support {watch_*} placeholders for watch triggers. */
+export interface CreateTicketAction {
+  type: "create_ticket";
+  title: string;
+  body: string;
+  priority?: Priority;
+  auto_start?: boolean;
+}
+
+/** Push deterministic stats summary to a Telegram chat. */
+export interface TelegramDigestAction {
+  type: "telegram_digest";
+  chat_id?: number;
+  lookback_hours?: number;
+}
+
+/** Flip the backlog scheduler. Pair two of these (running/paused) for a
+ *  maintenance window. */
+export interface SchedulerModeAction {
+  type: "scheduler_mode";
+  mode: SchedulerMode;
+}
+
+/** Run a one-shot Reviewer agent on a GitHub PR's diff and submit the result
+ *  as a proper GitHub review (with inline per-file/line comments where the
+ *  agent identifies issues). No ticket, no worktree, no Director — direct
+ *  path from "watch found a PR" to "PR has a structured review".
+ *
+ *  Works at two scopes:
+ *    - **Project-scoped** (job.project_id set): uses the project's Reviewer
+ *      agent + project's github_token from connector secrets.
+ *    - **Global** (job.project_id null): uses an admin Skill template
+ *      (default key "reviewer") + GITHUB_TOKEN env var. Token sees whatever
+ *      PRs it has access to.
+ *
+ *  Resolves PR coordinates from watch placeholders ({watch_repo}, {watch_id}).
+ */
+export interface ReviewPrAction {
+  type: "review_pr";
+  /** Project-scope: agent name (must exist in project.agents). Falls back to
+   *  the first reviewer-role agent if blank. */
+  agent_name?: string;
+  /** Global-scope: admin Skill template key (default "reviewer"). Ignored when
+   *  the job has a project_id. */
+  agent_template_key?: string;
+  /** When true (default), post the review back to the PR. Set false for dry
+   *  runs (review is generated and logged, nothing posted). */
+  post_comment?: boolean;
+  /** Review depth.
+   *    "comprehensive" — full review with style + nits + suggestions.
+   *    "critical_only" — only functional bugs, typos, security/perf concerns.
+   *  Defaults to "comprehensive". */
+  focus_mode?: "comprehensive" | "critical_only";
+  /** Override target — only useful for static cron jobs that target one PR.
+   *  Defaults to "{watch_repo}" / "{watch_id}" from the trigger item. */
+  repo_template?: string;
+  pr_number_template?: string;
+}
+
+/** Send a one-off Telegram message. Sibling to telegram_digest — that one
+ *  reports stats from local DB; this one is generic templated text. */
+export interface TelegramMessageAction {
+  type: "telegram_message";
+  chat_id?: number;
+  /** Message body. Supports {watch_*} placeholders from watch triggers. */
+  text: string;
+  parse_mode?: "Markdown" | "MarkdownV2" | "HTML" | "";
+}
+
+/** Generic HTTP webhook — POST/PUT/PATCH any URL with templated body.
+ *  Replaces dedicated Slack / Discord / n8n / Make / Zapier connectors —
+ *  one action covers all "send X somewhere" cases. */
+export interface WebhookAction {
+  type: "webhook";
+  url: string;
+  method?: "POST" | "PUT" | "PATCH";
+  /** Free-form headers (Authorization, X-Custom, etc.). */
+  headers?: Record<string, string>;
+  /** Request body — typically JSON. Supports {watch_*} placeholders. */
+  body_template: string;
+  /** Defaults to application/json. */
+  content_type?: string;
+}
+
+/** Perform a single GitHub operation against a target repo. Subsumes the
+ *  scheduled-job analog of the workflow connector phase (issue_comment etc.)
+ *  plus three new ops (assign, request_reviewers, dispatch_workflow). */
+export type GithubOp =
+  | { op: "issue_comment"; repo: string; issue_number: string; body: string }
+  | { op: "set_labels"; repo: string; issue_number: string; labels: string[] }
+  | { op: "close_issue"; repo: string; issue_number: string }
+  | { op: "assign"; repo: string; issue_number: string; assignees: string[] }
+  | { op: "request_reviewers"; repo: string; pr_number: string; reviewers: string[]; team_reviewers?: string[] }
+  | { op: "dispatch_workflow"; repo: string; workflow_id: string; ref?: string; inputs?: Record<string, string> };
+
+export interface GithubOpAction {
+  type: "github_op";
+  /** Operation discriminator + its config. All string fields support
+   *  {watch_*} placeholders so cron-triggered jobs can target a fixed item
+   *  while watch-triggered jobs target the trigger's item. */
+  github: GithubOp;
+}
+
+export type ScheduledJobAction =
+  | CreateTicketAction
+  | TelegramDigestAction
+  | TelegramMessageAction
+  | SchedulerModeAction
+  | ReviewPrAction
+  | WebhookAction
+  | GithubOpAction;
+
+export type ScheduledJobActionType = ScheduledJobAction["type"];
+export type ScheduledJobTriggerType = ScheduledJobTrigger["type"];
+
+// ---- Top-level shape --------------------------------------------------------
+
+// ---- review_pr structured output -------------------------------------------
+
+export const REVIEW_SEVERITIES = ["blocker", "major", "minor"] as const;
+export type ReviewSeverity = (typeof REVIEW_SEVERITIES)[number];
+
+export const WATCH_SOURCES = ["github", "jira"] as const;
+export type WatchSource = (typeof WATCH_SOURCES)[number];
+
+/** One inline review comment anchored on a specific file:line. Posted to
+ *  GitHub via the Pull Request Review API as one item in `comments[]`. */
+export interface InlineReviewComment {
+  path: string;
+  line: number;
+  /** "RIGHT" for added/modified lines (default), "LEFT" for deletions. */
+  side?: "LEFT" | "RIGHT";
+  severity: ReviewSeverity;
+  body: string;
+}
+
+/** Structured Reviewer output. The model is asked to return ONLY this shape,
+ *  parsed from its stream-json transcript and persisted to job_runs.details_json
+ *  for inspection in the activity feed. */
+export interface ReviewerOutput {
+  comments: InlineReviewComment[];
+}
+
+/** Wrapped details payload stored on job_runs.details_json for review_pr runs.
+ *  `mode` distinguishes a dry run / real-post / no-comments fast path so the
+ *  UI can label them appropriately. */
+export interface ReviewPrRunDetails {
+  mode: "dry_run" | "posted" | "no_comments";
+  repo: string;
+  pr: number;
+  review: ReviewerOutput;
+}
+
+/** Persistent log entry from job_runs table. One row per action invocation
+ *  (or trigger error). The list endpoint omits `details` to keep payloads
+ *  lean — set `has_details=true` and the UI lazy-loads via GET /job-runs/:id. */
+export interface JobRun {
+  id: number;
+  job_id: string;
+  job_name: string;
+  action_type: ScheduledJobActionType | string;
+  project_id: string | null;
+  fired_at: string;
+  ok: boolean;
+  /** Surfaces in the bell when true; ignored when false (quiet successes). */
+  notable: boolean;
+  summary: string;
+  url: string | null;
+  /** True when the row has a details_json blob (e.g. ReviewerOutput).
+   *  Set by the list endpoint; full content fetched on expand via GET /:id. */
+  has_details?: boolean;
+  /** Full details payload — present only on single-row fetch (GET /:id) or
+   *  legacy clients. */
+  details?: unknown;
+}
+
+/** Compact audit/notification entry surfaced from a job's recent runs. */
+export interface ScheduledJobResult {
+  at: string;
+  summary: string;
+  /** External URL if the action produced one (review on GitHub, ticket, etc). */
+  url?: string;
+  /** Set on fan-out runs — which project this entry came from. */
+  project_id?: string;
+}
+
+export interface ScheduledJob {
+  id: string;
+  name: string;
+  /** Single-scope: project this job runs in (null = default scope using admin secrets).
+   *  Ignored when `fan_out_project_ids` is set. */
+  project_id: string | null;
+  /** Fan-out: when non-empty, the job runs ONCE per project in this list,
+   *  each with that project's secrets / state / result trail. State is
+   *  partitioned per project so a new commit on PR-X in project A won't
+   *  shadow a different PR in project B. */
+  fan_out_project_ids?: string[];
+  trigger: ScheduledJobTrigger;
+  action: ScheduledJobAction;
+  /** Computed at create/update/fire. Null = disabled / one-shot fired. */
+  next_run_at: string | null;
+  last_run_at: string | null;
+  enabled: boolean;
+  /** Last N action results across all (sub-)executions, most recent first.
+   *  Each entry may carry `project_id` for fan-out runs. */
+  recent_results?: ScheduledJobResult[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateScheduledJobInput {
+  name: string;
+  project_id?: string | null;
+  fan_out_project_ids?: string[];
+  trigger: ScheduledJobTrigger;
+  action: ScheduledJobAction;
+  enabled?: boolean;
+}
+
+export interface UpdateScheduledJobInput {
+  name?: string;
+  project_id?: string | null;
+  fan_out_project_ids?: string[];
+  trigger?: ScheduledJobTrigger;
+  action?: ScheduledJobAction;
+  enabled?: boolean;
 }

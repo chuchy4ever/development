@@ -5,6 +5,9 @@ import { runTriage } from "../triage.js";
 import { deleteRunsForTicket } from "../runs.js";
 import { listTicketsForProject, loadProjectWithRepos, loadTicket } from "../store.js";
 import { bulkCreateTickets, parseMarkdownTickets } from "../bulkImport.js";
+import { runAgentOneShot } from "../oneShot.js";
+import { extractFinalText } from "../claude.js";
+import { extractCostFromStdout, recordCost } from "../costLog.js";
 import { decomposeTicket } from "../ctoDecompose.js";
 import { allocateTicketKey } from "../backfillTicketKeys.js";
 import type { BulkImportInput, BulkImportResult, CreateTicketInput, Ticket } from "@ceo/shared";
@@ -34,6 +37,63 @@ ticketsRouter.post("/", (req, res) => {
      VALUES (?, ?, ?, ?, ?, 'inbox', '[]', '[]', ?, ?)`,
   ).run(id, projectId, ticketKey, input.title.trim(), input.body ?? "", now, now);
   res.status(201).json(loadTicket(id));
+});
+
+/** Take a free-form project spec (zadani.md style) and return bulk-import
+ *  markdown — one ticket per `## Title` block with concrete acceptance
+ *  criteria the engine can act on. User reviews/edits the output and then
+ *  pipes it into POST /bulk. We deliberately don't auto-create tickets here:
+ *  the user wants to read the breakdown first. */
+ticketsRouter.post("/extract-from-spec", async (req, res) => {
+  const projectId = projectIdFrom(req);
+  const project = loadProjectWithRepos(projectId);
+  if (!project) return res.status(404).json({ error: "project not found" });
+  const spec = typeof req.body?.spec === "string" ? req.body.spec : "";
+  if (!spec.trim()) return res.status(400).json({ error: "spec is required" });
+
+  const sys = `You are a Product Decomposer. Given a free-form project spec, split it into a set of independently-deliverable tickets formatted for our bulk import parser.
+
+OUTPUT REQUIREMENTS (strict):
+- Use this EXACT format, nothing else — no preamble, no closing remark, no fences:
+
+## <short imperative title with verb + object>
+<1-2 sentence context: what & why>
+
+Acceptance:
+- <concrete, testable bullet>
+- <concrete, testable bullet>
+
+Hints:
+- <relevant files / patterns / gotchas if you can infer any from context>
+
+(repeat per ticket)
+
+RULES:
+- Each ticket is **independently deliverable** — a single coherent change. If two pieces of work can be shipped separately, split them.
+- Aim for 30 min – 1 day of work per ticket. Smaller is better than larger.
+- Titles are imperative ("Add /users endpoint", "Fix login redirect"), NOT noun phrases.
+- Skip "Hints" section if you have nothing concrete to add — empty bullets are noise.
+- Skip explanatory prose between tickets. Just heading + body, repeated.
+- If the spec mentions dependencies between tickets, mention them inside Acceptance ("after /login is wired"), don't try to encode them as IDs.
+- Output Czech if the spec is in Czech, English otherwise. Mirror the input language.`;
+
+  try {
+    const r = await runAgentOneShot(
+      { system_prompt: sys, model: "claude-sonnet-4-6" },
+      `Project context: ${project.name}${project.description ? ` — ${project.description}` : ""}\nRepos: ${(project.repos ?? []).map((rp) => rp.name).join(", ") || "(none)"}\n\n# Spec\n${spec.trim()}`,
+      undefined,
+    );
+    recordCost({
+      source: "extract_from_spec",
+      cost_usd: extractCostFromStdout(r.stdout),
+      project_id: projectId,
+    });
+    const text = extractFinalText(r.stdout).trim();
+    if (!text) return res.status(500).json({ error: "agent returned empty output" });
+    res.json({ markdown: text });
+  } catch (e: unknown) {
+    res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+  }
 });
 
 ticketsRouter.post("/bulk", async (req, res) => {

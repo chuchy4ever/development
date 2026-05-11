@@ -6,6 +6,7 @@ import { db, nowIso } from "./db.js";
 import { PROJECTS_DIR } from "./config.js";
 import { runAgentOneShot } from "./oneShot.js";
 import { extractJsonWithFallback } from "./jsonUtil.js";
+import { extractCostFromStdout, recordCost } from "./costLog.js";
 import { loadTicket } from "./store.js";
 import { allocateTicketKey } from "./backfillTicketKeys.js";
 import { AGENT_NAMES } from "./defaultAgents.js";
@@ -31,6 +32,8 @@ export interface DecomposeResult {
 export async function decomposeTicket(
   project: ProjectWithRepos,
   ticket: Ticket,
+  /** When set, CTO's claude cost is attributed to this director run. */
+  runId?: string | null,
 ): Promise<DecomposeResult> {
   const cto = project.agents.find((a) => a.name === AGENT_NAMES.CTO);
   if (!cto) {
@@ -74,6 +77,12 @@ Decide whether to decompose. If yes, produce ordered subtasks. End with the JSON
   }
 
   const res = await runAgentOneShot(cto, prompt, cwd);
+  recordCost({
+    source: "cto_decompose",
+    cost_usd: extractCostFromStdout(res.stdout),
+    project_id: project.id,
+    run_id: runId ?? null,
+  });
   const parsed = extractJsonWithFallback<CtoDecomposeOutput>(res.stdout);
   if (!parsed) {
     throw new Error(`CTO returned unparseable output: ${res.stdout.slice(0, 500)}`);

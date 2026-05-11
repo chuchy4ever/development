@@ -31,10 +31,33 @@ export interface TaskContext {
   unregisterCancel: () => void;
 }
 
+/** Read-side request for a connector. Used by Director when a ticket needs
+ *  external context (e.g. the body of JIRA-123 or PR #42). Connectors that
+ *  don't support reads simply omit `read()`. */
+export interface TaskReadParams {
+  project: ProjectWithRepos;
+  /** Connector-specific params. Each executor documents its shape:
+   *   - jira:   { key: string }
+   *   - github: { kind: "pr" | "issue", repo: string, number: number }
+   *   - ssh:    { host?: string, path: string } */
+  params: Record<string, unknown>;
+}
+
+export interface TaskReadResult {
+  ok: boolean;
+  /** Markdown-formatted summary suitable for inclusion in a Director / sub-agent prompt. */
+  content: string;
+  error?: string;
+}
+
 export interface TaskExecutor {
   type: string;
   /** Validate config at PUT time. Return null if ok, or an error message. */
   validate(config: Record<string, unknown>): string | null;
   /** Execute the task. Should always resolve (never throw); errors → ok=false verdict. */
   run(config: Record<string, unknown>, ctx: TaskContext): Promise<TaskVerdict>;
+  /** Optional: read external data from the connector's source. Used by Director
+   *  to pull ticket / PR / file context during a run. Should always resolve
+   *  (never throw); errors → ok=false. */
+  read?(params: TaskReadParams): Promise<TaskReadResult>;
 }

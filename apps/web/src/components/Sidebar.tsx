@@ -14,7 +14,7 @@ export function Sidebar({ projects, activeId, isAdmin, onSelect, onSelectAdmin, 
   const [lang, setLang] = useLang();
   return (
     <aside className="sidebar">
-      <h1>ceo</h1>
+      <h1>CEOrchestration</h1>
       <div className="projects">
         {projects.length === 0 && (
           <div style={{ color: "var(--text-dim)", padding: "12px", fontSize: "12px" }}>

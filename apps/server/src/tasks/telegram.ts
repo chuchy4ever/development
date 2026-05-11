@@ -1,4 +1,5 @@
 import type { TaskExecutor, TaskVerdict } from "./types.js";
+import { type Trigger, TRIGGER_VALUES, shouldFire, buildVars, render } from "./connectorShared.js";
 
 interface TelegramConfig {
   /** Bot token (e.g. "1234567:AAH..."). Stored in workflow JSON — keep workflow private. */
@@ -7,15 +8,9 @@ interface TelegramConfig {
   /** Message template. Placeholders: {ticket_key} {ticket_title} {project_name} {run_id} {verdict_summary} {verdict_status} */
   template: string;
   /** When to actually send. Defaults to "always". */
-  on?: "always" | "success" | "failure";
+  on?: Trigger;
   /** "Markdown" | "MarkdownV2" | "HTML" | "" (none). Defaults to "Markdown". */
   parse_mode?: "Markdown" | "MarkdownV2" | "HTML" | "";
-}
-
-const PLACEHOLDER_RE = /\{(ticket_key|ticket_title|project_name|run_id|verdict_summary|verdict_status)\}/g;
-
-function render(template: string, vars: Record<string, string>): string {
-  return template.replace(PLACEHOLDER_RE, (_, key) => vars[key] ?? "");
 }
 
 export const telegramExecutor: TaskExecutor = {
@@ -28,8 +23,8 @@ export const telegramExecutor: TaskExecutor = {
       return "telegram: 'chat_id' is required";
     if (!c.template || typeof c.template !== "string")
       return "telegram: 'template' is required";
-    if (c.on !== undefined && !["always", "success", "failure"].includes(c.on))
-      return "telegram: 'on' must be 'always', 'success' or 'failure'";
+    if (c.on !== undefined && !(TRIGGER_VALUES as readonly string[]).includes(c.on))
+      return `telegram: 'on' must be one of ${TRIGGER_VALUES.join(", ")}`;
     if (c.parse_mode !== undefined && !["Markdown", "MarkdownV2", "HTML", ""].includes(c.parse_mode))
       return "telegram: 'parse_mode' must be 'Markdown', 'MarkdownV2', 'HTML' or ''";
     return null;
@@ -37,36 +32,16 @@ export const telegramExecutor: TaskExecutor = {
 
   async run(config, ctx) {
     const c = config as unknown as TelegramConfig;
-    const on = c.on ?? "always";
-    const wasFailure = ctx.lastWasFailure;
-
-    if (on === "success" && wasFailure) {
+    const on: Trigger = c.on ?? "always";
+    if (!shouldFire(on, ctx.lastWasFailure)) {
       return {
         ok: true,
-        summary: `telegram: skipped (on=success, previous phase failed)`,
-        issues: [],
-      };
-    }
-    if (on === "failure" && !wasFailure) {
-      return {
-        ok: true,
-        summary: `telegram: skipped (on=failure, previous phase succeeded)`,
+        summary: `telegram: skipped (on=${on}, ${ctx.lastWasFailure ? "previous failed" : "previous ok"})`,
         issues: [],
       };
     }
 
-    const verdictSummary =
-      (ctx.lastVerdict && (ctx.lastVerdict as any).summary) || "(no previous verdict)";
-    const verdictStatus = wasFailure ? "❌ failed" : "✅ ok";
-
-    const text = render(c.template, {
-      ticket_key: ctx.ticket.ticket_key ?? ctx.ticket.id.slice(0, 6),
-      ticket_title: ctx.ticket.title,
-      project_name: ctx.project.name,
-      run_id: ctx.runId,
-      verdict_summary: String(verdictSummary),
-      verdict_status: verdictStatus,
-    });
+    const text = render(c.template, buildVars(ctx));
 
     const url = `https://api.telegram.org/bot${encodeURIComponent(c.bot_token)}/sendMessage`;
     const body = {

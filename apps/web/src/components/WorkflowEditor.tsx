@@ -40,18 +40,26 @@ interface Props {
 }
 
 /** UI-only mirror of the server task registry. Adding a new task type means
- *  registering it here (icon, color, palette label, default config, summary). */
+ *  registering it here (icon, color, palette label, default config, summary).
+ *
+ *  `category` controls which panel the task appears in:
+ *    - "gate"      = validation check that gates Director's mark_done (CI, lint, security scan).
+ *    - "connector" = side-effect integration (post a comment, transition issue, deploy).
+ *                    Director never gates on connectors; they're wired via workflow.on_success / on_failure.
+ */
 const TASK_TYPES: Record<string, {
   label: string;
   icon: string;
   color: string;
+  category: "gate" | "connector";
   defaultConfig: Record<string, unknown>;
   summary: (cfg: Record<string, unknown>) => string;
 }> = {
   shell: {
-    label: "Shell",
+    label: "Shell / CI",
     icon: "▷_",
     color: "#1e293b",
+    category: "gate",
     defaultConfig: { command: "make ci", timeout_sec: 600 },
     summary: (c) => String(c.command ?? "").slice(0, 32),
   },
@@ -59,6 +67,7 @@ const TASK_TYPES: Record<string, {
     label: "Telegram",
     icon: "✈",
     color: "#0ea5e9",
+    category: "connector",
     defaultConfig: {
       bot_token: "",
       chat_id: "",
@@ -68,12 +77,260 @@ const TASK_TYPES: Record<string, {
     },
     summary: (c) => `→ chat ${String(c.chat_id ?? "?")}`,
   },
+  github: {
+    label: "GitHub",
+    icon: "GH",
+    color: "#24292f",
+    category: "connector",
+    defaultConfig: {
+      default_repo: "",
+      actions: [{ on: "always", action: "issue_comment", issue_number: 0, body: "Run {run_id} {verdict_status}: {verdict_summary}" }],
+    },
+    summary: (c) => {
+      const n = Array.isArray(c.actions) ? (c.actions as unknown[]).length : 0;
+      return `${n} action${n === 1 ? "" : "s"}`;
+    },
+  },
+  jira: {
+    label: "Jira",
+    icon: "JR",
+    color: "#0052cc",
+    category: "connector",
+    defaultConfig: {
+      default_issue_key: "",
+      actions: [{ on: "always", action: "comment", body: "Run {run_id} {verdict_status}: {verdict_summary}" }],
+    },
+    summary: (c) => {
+      const n = Array.isArray(c.actions) ? (c.actions as unknown[]).length : 0;
+      return `${n} action${n === 1 ? "" : "s"}`;
+    },
+  },
+  ssh: {
+    label: "SSH",
+    icon: ">_",
+    color: "#15803d",
+    category: "connector",
+    defaultConfig: {
+      host: "",
+      timeout_sec: 600,
+      // port intentionally omitted — read from project secret ssh_default_port (or ssh's default 22)
+      actions: [{ on: "always", command: "echo {ticket_key} {verdict_status}" }],
+    },
+    summary: (c) => {
+      const host = String(c.host ?? "?");
+      const n = Array.isArray(c.actions) ? (c.actions as unknown[]).length : 0;
+      return `${host}: ${n} cmd${n === 1 ? "" : "s"}`;
+    },
+  },
+  git_push: {
+    label: "Git push",
+    icon: "↑",
+    color: "#7c2d12",
+    category: "connector",
+    defaultConfig: {
+      remote: "origin",
+      trigger: "success",
+      strategy: "ff_only",
+      commit_message_template: "",
+    },
+    summary: (c) => `push → ${String(c.remote ?? "origin")} · ${String(c.strategy ?? "ff_only")}`,
+  },
 };
+
+/** Built-in presets that drop a pre-configured gate or connector into a
+ *  workflow without typing the same boilerplate per project. Mirrors the
+ *  "Import from library" UX for skills, but kept client-side: presets are
+ *  static (compiled in), copied into the phase config, then editable per-
+ *  project. Updating a preset definition here doesn't retroactively change
+ *  existing phases — they're forks, not overlays. */
+interface WorkflowPhasePreset {
+  key: string;
+  label: string;
+  description: string;
+  /** Group header in the picker UI. */
+  category: "ci" | "git" | "approval" | "deploy";
+  /** Concrete phase to drop into the workflow when picked. */
+  phase: {
+    id: string;
+    kind: "task" | "approval";
+    notes?: string;
+    task?: { type: string; config: Record<string, unknown> };
+    approval?: { message: string };
+  };
+}
+
+const WORKFLOW_PHASE_PRESETS: WorkflowPhasePreset[] = [
+  // ---- CI gates ------------------------------------------------------------
+  {
+    key: "ci_php_symfony",
+    label: "PHP Symfony — composer ci",
+    description: "Runs `composer ci` in the worktree. Assumes a composer script that wraps PHPStan + PHPUnit + lint.",
+    category: "ci",
+    phase: {
+      id: "ci_gate",
+      kind: "task",
+      task: { type: "shell", config: { command: "composer ci", timeout_sec: 1800 } },
+    },
+  },
+  {
+    key: "ci_node_pnpm",
+    label: "Node.js — pnpm test",
+    description: "Runs `pnpm install --frozen-lockfile && pnpm test`. Use for Vite / Next / Nest projects.",
+    category: "ci",
+    phase: {
+      id: "ci_gate",
+      kind: "task",
+      task: { type: "shell", config: { command: "pnpm install --frozen-lockfile && pnpm test", timeout_sec: 1800 } },
+    },
+  },
+  {
+    key: "ci_npm_test",
+    label: "Node.js — npm test",
+    description: "Runs `npm ci && npm test`. Use when project sticks with npm.",
+    category: "ci",
+    phase: {
+      id: "ci_gate",
+      kind: "task",
+      task: { type: "shell", config: { command: "npm ci && npm test", timeout_sec: 1800 } },
+    },
+  },
+  {
+    key: "ci_docker_compose",
+    label: "Docker Compose — make ci in app service",
+    description: "`docker compose run --rm app make ci`. Use when CI runs inside a container (PHP, Python, etc.).",
+    category: "ci",
+    phase: {
+      id: "ci_gate",
+      kind: "task",
+      task: { type: "shell", config: { command: "docker compose run --rm app make ci", timeout_sec: 1800 } },
+    },
+  },
+  {
+    key: "ci_python_pytest",
+    label: "Python — pytest",
+    description: "`pip install -e . && pytest`. Use for pip-based Python projects.",
+    category: "ci",
+    phase: {
+      id: "ci_gate",
+      kind: "task",
+      task: { type: "shell", config: { command: "pip install -e . && pytest", timeout_sec: 1800 } },
+    },
+  },
+  {
+    key: "lint_phpstan",
+    label: "Lint — PHPStan strict",
+    description: "Runs `vendor/bin/phpstan analyse --no-progress`. Separate from CI for fast feedback.",
+    category: "ci",
+    phase: {
+      id: "lint_gate",
+      kind: "task",
+      task: { type: "shell", config: { command: "vendor/bin/phpstan analyse --no-progress", timeout_sec: 600 } },
+    },
+  },
+  {
+    key: "lint_eslint",
+    label: "Lint — ESLint strict",
+    description: "Runs `pnpm exec eslint . --max-warnings=0`. Fails on any warning.",
+    category: "ci",
+    phase: {
+      id: "lint_gate",
+      kind: "task",
+      task: { type: "shell", config: { command: "pnpm exec eslint . --max-warnings=0", timeout_sec: 600 } },
+    },
+  },
+
+  // ---- Git push connectors -------------------------------------------------
+  {
+    key: "git_push_dev_squash",
+    label: "Git push — development, squash with ticket title",
+    description: "Pushes to `origin development` as one squashed commit named after the ticket. Recommended for clean git log.",
+    category: "git",
+    phase: {
+      id: "git_push",
+      kind: "task",
+      task: {
+        type: "git_push",
+        config: {
+          remote: "origin",
+          trigger: "success",
+          strategy: "squash",
+          commit_message_template: "{ticket_title}",
+        },
+      },
+    },
+  },
+  {
+    key: "git_push_main_ff",
+    label: "Git push — main, ff-only (preserves all commits)",
+    description: "Pushes to `origin main` keeping every sub-agent commit. Suitable for projects without squash policy.",
+    category: "git",
+    phase: {
+      id: "git_push",
+      kind: "task",
+      task: {
+        type: "git_push",
+        config: { remote: "origin", trigger: "success", strategy: "ff_only" },
+      },
+    },
+  },
+  {
+    key: "git_push_dev_ff",
+    label: "Git push — development, ff-only",
+    description: "Pushes to `origin development` keeping all commits. Pair with manual MR/PR creation on GitLab/GitHub.",
+    category: "git",
+    phase: {
+      id: "git_push",
+      kind: "task",
+      task: {
+        type: "git_push",
+        config: { remote: "origin", trigger: "success", strategy: "ff_only" },
+      },
+    },
+  },
+
+  // ---- Approval gates ------------------------------------------------------
+  {
+    key: "approval_before_destructive",
+    label: "Approval — confirm before destructive migration",
+    description: "Pauses the run so a human approves before a schema drop / data delete runs.",
+    category: "approval",
+    phase: {
+      id: "approval_destructive",
+      kind: "approval",
+      approval: { message: "About to run a destructive migration. Review the diff and approve to proceed." },
+    },
+  },
+  {
+    key: "approval_before_prod",
+    label: "Approval — confirm before production deploy",
+    description: "Pauses the run so a human approves before a deploy to production.",
+    category: "approval",
+    phase: {
+      id: "approval_prod",
+      kind: "approval",
+      approval: { message: "Ready to deploy to production. Approve when monitoring is clear." },
+    },
+  },
+];
+
+/** CI presets for the "shell" task — friendly wizard that generates a
+ *  shell command instead of asking the user to write one. Picking "custom"
+ *  drops back to a raw command field. */
+const CI_PRESETS: { key: string; label: string; build: (cfg: Record<string, unknown>) => string }[] = [
+  { key: "make", label: "Make target", build: (c) => `make ${String(c.target ?? "ci")}` },
+  { key: "npm", label: "npm/pnpm script", build: (c) => `${String(c.runner ?? "npm")} run ${String(c.script ?? "test")}` },
+  { key: "docker", label: "Docker Compose", build: (c) => `docker compose run --rm ${String(c.service ?? "app")} ${String(c.cmd ?? "make ci")}` },
+  { key: "composer", label: "Composer script", build: (c) => `composer ${String(c.script ?? "test")}` },
+  { key: "custom", label: "Custom shell", build: (c) => String(c.command ?? "") },
+];
 
 interface TaskFormProps {
   phase: WorkflowPhase;
   onChangeType: (type: string) => void;
   onChangeConfig: (config: Record<string, unknown>) => void;
+  /** Connector forms get split across two tabs ("Connection" + "Actions").
+   *  Pass which tab to render; "all" = render the full form (legacy / non-connector). */
+  connectorTab?: "connection" | "actions" | "all";
 }
 
 function getCurrentConfig(phase: WorkflowPhase): Record<string, unknown> {
@@ -108,58 +365,94 @@ function CodePreviewButton({ value, emptyLabel, onClick }: CodePreviewButtonProp
   );
 }
 
-function TaskFormSection({ phase, onChangeType, onChangeConfig }: TaskFormProps) {
+function TaskFormSection({ phase, onChangeType, onChangeConfig, connectorTab = "all" }: TaskFormProps) {
   const type = getTaskKindForPhase(phase) ?? "shell";
   const config = getCurrentConfig(phase);
   const setField = (key: string, value: unknown) => onChangeConfig({ ...config, [key]: value });
   const [editing, setEditing] = useState<null | { field: string; lang: "bash" | "template"; title: string; hint?: string }>(null);
+  const isConnector = TASK_TYPES[type]?.category === "connector";
 
   return (
     <>
-      <div className="form-row">
-        <label>task type</label>
-        <select value={type} onChange={(e) => onChangeType(e.target.value)}>
-          {Object.entries(TASK_TYPES).map(([t, meta]) => (
-            <option key={t} value={t}>
-              {meta.label}
-            </option>
-          ))}
-        </select>
-      </div>
+      {/* Task type selector only for gates (where switching shell <-> approval makes
+          sense). Connectors are picked by the "+ Přidat konektor" button — switching
+          from GitHub to Jira mid-edit just throws away config, so we hide it. */}
+      {!isConnector && (
+        <div className="form-row">
+          <label>task type</label>
+          <select value={type} onChange={(e) => onChangeType(e.target.value)}>
+            {Object.entries(TASK_TYPES).filter(([, m]) => m.category === "gate").map(([t, meta]) => (
+              <option key={t} value={t}>
+                {meta.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
       {type === "shell" && (
+        <ShellPresetForm config={config} setField={setField} openEditor={(spec) => setEditing(spec)} phaseId={phase.id} />
+      )}
+      {type === "github" && (
+        <GitHubForm config={config} setField={setField} openEditor={(spec) => setEditing(spec)} phaseId={phase.id} tab={connectorTab} />
+      )}
+      {type === "jira" && (
+        <JiraForm config={config} setField={setField} openEditor={(spec) => setEditing(spec)} phaseId={phase.id} tab={connectorTab} />
+      )}
+      {type === "ssh" && (
+        <SshForm config={config} setField={setField} openEditor={(spec) => setEditing(spec)} phaseId={phase.id} tab={connectorTab} />
+      )}
+      {type === "git_push" && (
         <>
-          <div className="form-row">
-            <label>command</label>
-            <CodePreviewButton
-              value={String(config.command ?? "")}
-              emptyLabel="(empty — click to write a shell command)"
-              onClick={() => setEditing({
-                field: "command",
-                lang: "bash",
-                title: `Edit shell command — ${phase.id}`,
-                hint: "Runs via bash -lc in the run worktree. Exit 0 → next; non-zero → retry target.",
-              })}
-            />
+          <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 10, padding: "8px 10px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 6 }}>
+            Po dokončení runu pushne base branch každého repa projektu na zadaný remote. Pracuje pro GitLab i GitHub — používá git CLI nad existující remote konfigurací, žádné platform-specific API. Engine se postará o lokální merge worktree → base; tato akce jen pushne ven (případně přepíše merge na jeden squash commit).
           </div>
           <div className="form-row">
-            <label>working dir (relative to run root, optional)</label>
+            <label>remote</label>
             <input
-              value={String(config.working_dir ?? "")}
-              onChange={(e) => setField("working_dir", e.target.value || null)}
-              placeholder="(run root)"
+              value={String(config.remote ?? "origin")}
+              onChange={(e) => setField("remote", e.target.value)}
+              placeholder="origin"
               style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
             />
           </div>
           <div className="form-row">
-            <label>timeout (seconds, max 1800)</label>
-            <input
-              type="number"
-              min={1}
-              max={1800}
-              value={Number(config.timeout_sec ?? 600)}
-              onChange={(e) => setField("timeout_sec", Number(e.target.value))}
-            />
+            <label>push when</label>
+            <select
+              value={String(config.trigger ?? "success")}
+              onChange={(e) => setField("trigger", e.target.value)}
+            >
+              <option value="success">only on success (recommended)</option>
+              <option value="always">always (even on failure — push partial work)</option>
+              <option value="failure">only on failure (rare)</option>
+            </select>
           </div>
+          <div className="form-row">
+            <label>strategy</label>
+            <select
+              value={String(config.strategy ?? "ff_only")}
+              onChange={(e) => setField("strategy", e.target.value)}
+            >
+              <option value="ff_only">ff-only (zachová všechny sub-agent commits)</option>
+              <option value="squash">squash (jeden commit s vlastní message)</option>
+            </select>
+            <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+              <b>ff-only:</b> ponechá 10+ drobných commitů od Junior/Senior. <b>squash:</b> všechno do jednoho commitu se zprávou níže — čistší git log na development.
+            </div>
+          </div>
+          {String(config.strategy ?? "ff_only") === "squash" && (
+            <div className="form-row">
+              <label>commit message template</label>
+              <input
+                value={String(config.commit_message_template ?? "")}
+                onChange={(e) => setField("commit_message_template", e.target.value)}
+                placeholder="implement {ticket_title}"
+                style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+              />
+              <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+                Placeholders: <code>{"{ticket_key} {ticket_title} {project_name} {run_id} {verdict_summary} {verdict_status}"}</code>
+              </div>
+            </div>
+          )}
         </>
       )}
       {type === "telegram" && (
@@ -246,6 +539,618 @@ function getTaskKindForPhase(phase: WorkflowPhase): string | null {
   if (phase.kind === "command") return "shell";
   if (phase.kind === "task") return phase.task?.type ?? null;
   return null;
+}
+
+// ---- Sub-forms for each task type ------------------------------------------
+
+interface SubFormProps {
+  config: Record<string, unknown>;
+  setField: (key: string, value: unknown) => void;
+  /** Top-level editor (used by single-field forms like ShellPresetForm).
+   *  Multi-action forms manage their own editor state internally to support
+   *  per-action `body` / `command` fields without leaking synthetic top-level keys. */
+  openEditor: (spec: { field: string; lang: "bash" | "template"; title: string; hint?: string }) => void;
+  phaseId: string;
+  /** Connector forms render only the "Connection" or "Actions" section based
+   *  on the active tab. Non-connector forms ignore this prop. */
+  tab?: "connection" | "actions" | "all";
+}
+
+/** Mutator bundle for an action list inside a connector config. Each
+ *  multi-action form (GitHub / Jira / SSH) consumes the same shape — extract
+ *  the boilerplate into one hook so adding a connector means writing only
+ *  the per-action UI, not the array plumbing. */
+type ConnectorAction = Record<string, unknown>;
+
+function useActionList(
+  actions: ConnectorAction[],
+  setField: (key: string, value: unknown) => void,
+  newActionDefault: () => ConnectorAction,
+) {
+  const updateAll = (next: ConnectorAction[]) => setField("actions", next);
+  return {
+    update: (i: number, patch: ConnectorAction) =>
+      updateAll(actions.map((a, j) => (j === i ? { ...a, ...patch } : a))),
+    add: () => updateAll([...actions, newActionDefault()]),
+    remove: (i: number) => updateAll(actions.filter((_, j) => j !== i)),
+    move: (i: number, dir: -1 | 1) => {
+      const j = i + dir;
+      if (j < 0 || j >= actions.length) return;
+      const next = [...actions];
+      [next[i], next[j]] = [next[j]!, next[i]!];
+      updateAll(next);
+    },
+  };
+}
+
+/** Local editor state for connector forms that need to edit one action's
+ *  multi-line field (body, command). Wraps CodeEditorModal so each form
+ *  manages its own modal independent of the parent. */
+function useActionEditor() {
+  const [editing, setEditing] = useState<null | { value: string; lang: "bash" | "template"; title: string; hint?: string; onSave: (next: string) => void }>(null);
+  const open = (spec: { value: string; lang: "bash" | "template"; title: string; hint?: string; onSave: (next: string) => void }) => setEditing(spec);
+  const close = () => setEditing(null);
+  const node = editing ? (
+    <CodeEditorModal
+      title={editing.title}
+      value={editing.value}
+      language={editing.lang}
+      hint={editing.hint}
+      onClose={close}
+      onSave={(next) => { editing.onSave(next); close(); }}
+    />
+  ) : null;
+  return { open, node };
+}
+
+/** Infer which CI preset best matches an existing shell command. Used on
+ *  first render so legacy phases land on a sensible preset, not "custom". */
+function inferPreset(command: string): { preset: string; fields: Record<string, unknown> } {
+  const c = command.trim();
+  if (/^make\s+/.test(c)) return { preset: "make", fields: { target: c.replace(/^make\s+/, "") } };
+  if (/^docker\s+compose\s+run\b/.test(c)) return { preset: "docker", fields: {} };
+  if (/^(npm|pnpm|yarn)\s+(run\s+)?/.test(c)) {
+    const m = c.match(/^(npm|pnpm|yarn)\s+(?:run\s+)?(\S+)/);
+    return { preset: "npm", fields: { runner: m?.[1] ?? "npm", script: m?.[2] ?? "test" } };
+  }
+  if (/^composer\s+/.test(c)) return { preset: "composer", fields: { script: c.replace(/^composer\s+/, "") } };
+  return { preset: "custom", fields: {} };
+}
+
+function ShellPresetForm({ config, setField, openEditor, phaseId }: SubFormProps) {
+  const stored = String(config.__preset ?? "");
+  const inferred = stored || inferPreset(String(config.command ?? "")).preset;
+  const preset = inferred;
+  // Show the preset-wizard UI only when user explicitly opted in (non-custom
+  // preset stored, or expanded toggle). The 90% case is "type a command" —
+  // global preset picker (📦 Použít preset) handles tech-stack templates.
+  const [showWizard, setShowWizard] = useState(preset !== "custom");
+
+  const updatePreset = (next: string) => {
+    setField("__preset", next);
+    if (next === "custom") return; // keep current command
+    const builders: Record<string, () => string> = {
+      make: () => `make ${String(config.target ?? "ci")}`,
+      docker: () => `docker compose run --rm ${String(config.service ?? "app")} ${String(config.cmd ?? "make ci")}`,
+      npm: () => `${String(config.runner ?? "npm")} run ${String(config.script ?? "test")}`,
+      composer: () => `composer ${String(config.script ?? "test")}`,
+    };
+    const cmd = builders[next]?.() ?? "";
+    if (cmd) setField("command", cmd);
+  };
+
+  // Update command whenever the preset's parametric fields change.
+  const updatePresetField = (key: string, value: unknown) => {
+    setField(key, value);
+    const after = { ...config, [key]: value };
+    if (preset === "make") setField("command", `make ${String(after.target ?? "ci")}`);
+    else if (preset === "docker") setField("command", `docker compose run --rm ${String(after.service ?? "app")} ${String(after.cmd ?? "make ci")}`);
+    else if (preset === "npm") setField("command", `${String(after.runner ?? "npm")} run ${String(after.script ?? "test")}`);
+    else if (preset === "composer") setField("command", `composer ${String(after.script ?? "test")}`);
+  };
+
+  return (
+    <>
+      {showWizard ? (
+        <div className="form-row">
+          <label>preset</label>
+          <select value={preset} onChange={(e) => updatePreset(e.target.value)}>
+            {CI_PRESETS.map((p) => (
+              <option key={p.key} value={p.key}>{p.label}</option>
+            ))}
+          </select>
+          <button type="button" onClick={() => { setShowWizard(false); updatePreset("custom"); }} style={{ marginTop: 6, fontSize: 11, padding: "2px 8px", background: "transparent", border: "1px dashed var(--border)", color: "var(--text-dim)" }}>
+            ✕ Zrušit wizard, napsat příkaz ručně
+          </button>
+        </div>
+      ) : (
+        <button type="button" onClick={() => setShowWizard(true)} style={{ marginBottom: 10, fontSize: 11, padding: "4px 10px", background: "transparent", border: "1px dashed var(--border)", color: "var(--text-dim)" }}>
+          📋 Použít wizard pro Make / npm / Docker / Composer
+        </button>
+      )}
+
+      {showWizard && preset === "make" && (
+        <div className="form-row">
+          <label>make target</label>
+          <input
+            value={String(config.target ?? "ci")}
+            onChange={(e) => updatePresetField("target", e.target.value)}
+            placeholder="ci"
+            style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+          />
+        </div>
+      )}
+
+      {showWizard && preset === "npm" && (
+        <>
+          <div className="form-row">
+            <label>runner</label>
+            <select value={String(config.runner ?? "npm")} onChange={(e) => updatePresetField("runner", e.target.value)}>
+              <option value="npm">npm</option>
+              <option value="pnpm">pnpm</option>
+              <option value="yarn">yarn</option>
+            </select>
+          </div>
+          <div className="form-row">
+            <label>script</label>
+            <input
+              value={String(config.script ?? "test")}
+              onChange={(e) => updatePresetField("script", e.target.value)}
+              placeholder="test | lint | typecheck"
+              style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+            />
+          </div>
+        </>
+      )}
+
+      {showWizard && preset === "docker" && (
+        <>
+          <div className="form-row">
+            <label>service</label>
+            <input
+              value={String(config.service ?? "app")}
+              onChange={(e) => updatePresetField("service", e.target.value)}
+              placeholder="app"
+              style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+            />
+          </div>
+          <div className="form-row">
+            <label>command inside container</label>
+            <input
+              value={String(config.cmd ?? "make ci")}
+              onChange={(e) => updatePresetField("cmd", e.target.value)}
+              placeholder="make ci"
+              style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+            />
+          </div>
+        </>
+      )}
+
+      {showWizard && preset === "composer" && (
+        <div className="form-row">
+          <label>composer script</label>
+          <input
+            value={String(config.script ?? "test")}
+            onChange={(e) => updatePresetField("script", e.target.value)}
+            placeholder="test | lint"
+            style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+          />
+        </div>
+      )}
+
+      <div className="form-row">
+        <label>{showWizard && preset !== "custom" ? "generated command" : "command"}</label>
+        {showWizard && preset !== "custom" ? (
+          <code style={{ background: "var(--gray-soft)", padding: "6px 10px", borderRadius: 4, fontSize: 12, display: "block" }}>
+            {String(config.command ?? "")}
+          </code>
+        ) : (
+          <CodePreviewButton
+            value={String(config.command ?? "")}
+            emptyLabel="(empty — click to write a shell command)"
+            onClick={() => openEditor({
+              field: "command",
+              lang: "bash",
+              title: `Edit shell command — ${phaseId}`,
+              hint: "Runs via bash -lc in the run worktree. Exit 0 → next; non-zero → retry target.",
+            })}
+          />
+        )}
+      </div>
+
+      <div className="form-row">
+        <label>working dir (relative to run root, optional)</label>
+        <input
+          value={String(config.working_dir ?? "")}
+          onChange={(e) => setField("working_dir", e.target.value || null)}
+          placeholder="(run root)"
+          style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+        />
+      </div>
+      <div className="form-row">
+        <label>timeout (seconds, max 1800)</label>
+        <input
+          type="number"
+          min={1}
+          max={1800}
+          value={Number(config.timeout_sec ?? 600)}
+          onChange={(e) => setField("timeout_sec", Number(e.target.value))}
+        />
+      </div>
+    </>
+  );
+}
+
+// ---- Multi-action connector forms ------------------------------------------
+
+/** Normalize a connector config into a working { actions: [...] } shape so the
+ *  UI always edits an array, even on legacy single-action phases. The action
+ *  shape is widened to a generic record because the editor handles arbitrary
+ *  per-connector keys (body, repo, transition_name, working_dir, ...). */
+
+function ensureActions(
+  config: Record<string, unknown>,
+  legacyKeys: string[],
+  defaultAction: ConnectorAction,
+): { actions: ConnectorAction[] } {
+  if (Array.isArray(config.actions)) {
+    return { actions: config.actions as ConnectorAction[] };
+  }
+  // Lift legacy fields into a single action so existing phases keep working.
+  const lifted: ConnectorAction = { ...defaultAction, on: defaultAction.on ?? "always" };
+  for (const k of legacyKeys) {
+    if (config[k] !== undefined) lifted[k] = config[k];
+  }
+  return { actions: [lifted] };
+}
+
+/** Reusable trigger dropdown shown on every action row. */
+function TriggerSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)} style={{ fontSize: 12 }}>
+      <option value="always">always</option>
+      <option value="success">on success</option>
+      <option value="failure">on failure</option>
+    </select>
+  );
+}
+
+interface ActionRowChromeProps {
+  index: number;
+  total: number;
+  trigger: string;
+  onChangeTrigger: (v: string) => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  onDelete: () => void;
+  children: React.ReactNode;
+}
+function ActionRowChrome({ index, total, trigger, onChangeTrigger, onMoveUp, onMoveDown, onDelete, children }: ActionRowChromeProps) {
+  return (
+    <div style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 10, marginBottom: 8, background: "var(--bg-soft, #fafafa)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <span style={{ fontSize: 11, color: "var(--text-dim)", minWidth: 14 }}>#{index + 1}</span>
+        <TriggerSelect value={trigger} onChange={onChangeTrigger} />
+        <div style={{ flex: 1 }} />
+        <button onClick={onMoveUp} disabled={index === 0} title="Move up">↑</button>
+        <button onClick={onMoveDown} disabled={index === total - 1} title="Move down">↓</button>
+        <button onClick={onDelete} className="danger" title="Delete this action">×</button>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function GitHubForm({ config, setField, phaseId, tab = "all" }: SubFormProps) {
+  const editor = useActionEditor();
+  const { actions } = ensureActions(config, [], { on: "always", action: "issue_comment", issue_number: 0 });
+  const list = useActionList(actions, setField, () => ({
+    on: "always", action: "issue_comment", issue_number: 0, body: "Run {run_id} {verdict_status}: {verdict_summary}",
+  }));
+  const { update: updateAction, add: addAction, remove: removeAction, move: moveAction } = list;
+
+  const showConnection = tab === "connection" || tab === "all";
+  const showActions = tab === "actions" || tab === "all";
+
+  return (
+    <>
+      {showConnection && (
+        <div className="form-row">
+          <label>default repo (owner/name)</label>
+          <input
+            value={String(config.default_repo ?? config.repo ?? "")}
+            onChange={(e) => setField("default_repo", e.target.value)}
+            placeholder="owner/repo (used when an action omits its own repo)"
+            style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+          />
+        </div>
+      )}
+
+      {showActions && (
+      <div style={{ marginTop: 8 }}>
+        {actions.map((a, i) => {
+          const action = String(a.action ?? "issue_comment");
+          return (
+            <ActionRowChrome
+              key={i}
+              index={i}
+              total={actions.length}
+              trigger={String(a.on ?? "always")}
+              onChangeTrigger={(v) => updateAction(i, { on: v })}
+              onMoveUp={() => moveAction(i, -1)}
+              onMoveDown={() => moveAction(i, 1)}
+              onDelete={() => removeAction(i)}
+            >
+              <div className="form-row">
+                <label>action</label>
+                <select value={action} onChange={(e) => updateAction(i, { action: e.target.value })}>
+                  <option value="issue_comment">Comment on issue / PR</option>
+                  <option value="set_labels">Set labels (replaces existing)</option>
+                  <option value="close_issue">Close issue / PR</option>
+                </select>
+              </div>
+              <div className="form-row">
+                <label>repo (optional override)</label>
+                <input
+                  value={String(a.repo ?? "")}
+                  onChange={(e) => updateAction(i, { repo: e.target.value || undefined })}
+                  placeholder="(uses default_repo above)"
+                  style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+                />
+              </div>
+              <div className="form-row">
+                <label>issue / PR number</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={Number(a.issue_number ?? 0)}
+                  onChange={(e) => updateAction(i, { issue_number: Number(e.target.value) })}
+                />
+              </div>
+              {action === "issue_comment" && (
+                <div className="form-row">
+                  <label>comment body</label>
+                  <CodePreviewButton
+                    value={String(a.body ?? "")}
+                    emptyLabel="(empty — click to write)"
+                    onClick={() => editor.open({
+                      value: String(a.body ?? ""),
+                      lang: "template",
+                      title: `Edit GitHub comment body — ${phaseId} action #${i + 1}`,
+                      hint: "Placeholders: {ticket_key} {ticket_title} {project_name} {run_id} {verdict_summary} {verdict_status}",
+                      onSave: (next) => updateAction(i, { body: next }),
+                    })}
+                  />
+                </div>
+              )}
+              {action === "set_labels" && (
+                <div className="form-row">
+                  <label>labels (comma-separated)</label>
+                  <input
+                    value={Array.isArray(a.labels) ? (a.labels as string[]).join(", ") : ""}
+                    onChange={(e) => updateAction(i, { labels: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) })}
+                    placeholder="bug, automated, ready-for-review"
+                    style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+                  />
+                </div>
+              )}
+            </ActionRowChrome>
+          );
+        })}
+        <button onClick={addAction}>+ Add action</button>
+      </div>
+      )}
+
+      {showConnection && (
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 8 }}>
+          Auth: project settings → Connector secrets → <code>github_token</code> (PAT with <code>repo</code> scope).
+        </div>
+      )}
+      {showActions && (
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 8 }}>
+          All eligible actions fire automatically when the run terminates; the trigger filters which ones run.
+        </div>
+      )}
+      {editor.node}
+    </>
+  );
+}
+
+function JiraForm({ config, setField, phaseId, tab = "all" }: SubFormProps) {
+  const editor = useActionEditor();
+  const { actions } = ensureActions(config, [], { on: "always", action: "comment" });
+  const list = useActionList(actions, setField, () => ({
+    on: "always", action: "comment", body: "Run {run_id} {verdict_status}: {verdict_summary}",
+  }));
+  const { update: updateAction, add: addAction, remove: removeAction, move: moveAction } = list;
+
+  const showConnection = tab === "connection" || tab === "all";
+  const showActions = tab === "actions" || tab === "all";
+
+  return (
+    <>
+      {showConnection && (
+        <div className="form-row">
+          <label>default issue key</label>
+          <input
+            value={String(config.default_issue_key ?? config.issue_key ?? "")}
+            onChange={(e) => setField("default_issue_key", e.target.value.toUpperCase())}
+            placeholder="PROJ-123 (used when an action omits its own issue_key)"
+            style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+          />
+        </div>
+      )}
+
+      {showActions && (
+      <div style={{ marginTop: 8 }}>
+        {actions.map((a, i) => {
+          const action = String(a.action ?? "comment");
+          return (
+            <ActionRowChrome
+              key={i}
+              index={i}
+              total={actions.length}
+              trigger={String(a.on ?? "always")}
+              onChangeTrigger={(v) => updateAction(i, { on: v })}
+              onMoveUp={() => moveAction(i, -1)}
+              onMoveDown={() => moveAction(i, 1)}
+              onDelete={() => removeAction(i)}
+            >
+              <div className="form-row">
+                <label>action</label>
+                <select value={action} onChange={(e) => updateAction(i, { action: e.target.value })}>
+                  <option value="comment">Add comment</option>
+                  <option value="transition">Transition issue (move to status)</option>
+                </select>
+              </div>
+              <div className="form-row">
+                <label>issue key (optional override)</label>
+                <input
+                  value={String(a.issue_key ?? "")}
+                  onChange={(e) => updateAction(i, { issue_key: e.target.value.toUpperCase() || undefined })}
+                  placeholder="(uses default_issue_key above)"
+                  style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+                />
+              </div>
+              {action === "comment" && (
+                <div className="form-row">
+                  <label>comment body</label>
+                  <CodePreviewButton
+                    value={String(a.body ?? "")}
+                    emptyLabel="(empty — click to write)"
+                    onClick={() => editor.open({
+                      value: String(a.body ?? ""),
+                      lang: "template",
+                      title: `Edit Jira comment body — ${phaseId} action #${i + 1}`,
+                      hint: "Placeholders: {ticket_key} {ticket_title} {project_name} {run_id} {verdict_summary} {verdict_status}. Plain text — Jira renders Atlassian Document Format.",
+                      onSave: (next) => updateAction(i, { body: next }),
+                    })}
+                  />
+                </div>
+              )}
+              {action === "transition" && (
+                <div className="form-row">
+                  <label>transition name</label>
+                  <input
+                    value={String(a.transition_name ?? "")}
+                    onChange={(e) => updateAction(i, { transition_name: e.target.value })}
+                    placeholder="Done | In Review | Closed"
+                    style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+                  />
+                </div>
+              )}
+            </ActionRowChrome>
+          );
+        })}
+        <button onClick={addAction}>+ Add action</button>
+      </div>
+      )}
+
+      {showConnection && (
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 8 }}>
+          Auth: project settings → Connector secrets → <code>jira_base_url</code> + <code>jira_email</code> + <code>jira_api_token</code>.
+        </div>
+      )}
+      {showActions && (
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 8 }}>
+          Transitions are resolved by name (case-insensitive) at fire time.
+        </div>
+      )}
+      {editor.node}
+    </>
+  );
+}
+
+function SshForm({ config, setField, phaseId, tab = "all" }: SubFormProps) {
+  const editor = useActionEditor();
+  const { actions } = ensureActions(config, [], { on: "always", command: "" });
+  const list = useActionList(actions, setField, () => ({
+    on: "always", command: "echo {ticket_key} {verdict_status}",
+  }));
+  const { update: updateAction, add: addAction, remove: removeAction, move: moveAction } = list;
+
+  const showConnection = tab === "connection" || tab === "all";
+  const showActions = tab === "actions" || tab === "all";
+
+  return (
+    <>
+      {showConnection && (
+        <>
+          <div className="form-row">
+            <label>host (override, volitelné)</label>
+            <input
+              value={String(config.host ?? "")}
+              onChange={(e) => setField("host", e.target.value)}
+              placeholder="user@host:port (jinak se použije ssh_default_target ze secrets)"
+              style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+            />
+            <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 2 }}>
+              Cíl + klíč nastavíš v project settings → Connector secrets (<code>ssh_default_target</code>, <code>ssh_key_path</code>). Tady jen kdyby tahle fáze měla cílit jinam.
+            </div>
+          </div>
+          <div className="form-row">
+            <label>timeout (seconds, per command)</label>
+            <input
+              type="number"
+              min={1}
+              max={1800}
+              value={Number(config.timeout_sec ?? 600)}
+              onChange={(e) => setField("timeout_sec", Number(e.target.value))}
+            />
+          </div>
+        </>
+      )}
+
+      {showActions && (
+      <div style={{ marginTop: 8 }}>
+        {actions.map((a, i) => (
+          <ActionRowChrome
+            key={i}
+            index={i}
+            total={actions.length}
+            trigger={String(a.on ?? "always")}
+            onChangeTrigger={(v) => updateAction(i, { on: v })}
+            onMoveUp={() => moveAction(i, -1)}
+            onMoveDown={() => moveAction(i, 1)}
+            onDelete={() => removeAction(i)}
+          >
+            <div className="form-row">
+              <label>command</label>
+              <CodePreviewButton
+                value={String(a.command ?? "")}
+                emptyLabel="(empty — click to write the remote command)"
+                onClick={() => editor.open({
+                  value: String(a.command ?? ""),
+                  lang: "bash",
+                  title: `Edit SSH command — ${phaseId} action #${i + 1}`,
+                  hint: "Runs in the remote shell. Placeholders: {ticket_key} {ticket_title} {project_name} {run_id} {verdict_summary} {verdict_status}.",
+                  onSave: (next) => updateAction(i, { command: next }),
+                })}
+              />
+            </div>
+            <div className="form-row">
+              <label>working dir (optional)</label>
+              <input
+                value={String(a.working_dir ?? "")}
+                onChange={(e) => updateAction(i, { working_dir: e.target.value || undefined })}
+                placeholder="/var/www/app"
+                style={{ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}
+              />
+            </div>
+          </ActionRowChrome>
+        ))}
+        <button onClick={addAction}>+ Add action</button>
+      </div>
+      )}
+
+      {showConnection && (
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 8 }}>
+          Auth: project settings → Connector secrets → <code>ssh_key_path</code> (key-based auth required; password prompts disabled).
+        </div>
+      )}
+      {editor.node}
+    </>
+  );
 }
 
 
@@ -380,23 +1285,66 @@ function SkillsPanel({
   );
 }
 
+/** Render one task/approval phase row. Used by both Gates and Connectors panels. */
+function TaskPhaseRow({ phase, onSelect }: { phase: WorkflowPhase; onSelect: (id: string) => void }) {
+  const taskType = phase.kind === "task" ? phase.task?.type : phase.kind === "approval" ? "approval" : "shell";
+  const meta = TASK_TYPES[taskType ?? "shell"];
+  const isApproval = phase.kind === "approval";
+  return (
+    <button
+      key={phase.id}
+      onClick={() => onSelect(phase.id)}
+      className="row-card"
+      style={{ width: "100%", textAlign: "left" }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <div>
+          <span style={{
+            display: "inline-block", width: 22, height: 22, lineHeight: "22px",
+            textAlign: "center", borderRadius: 4, marginRight: 8,
+            background: meta?.color ?? (isApproval ? "#f59e0b" : "#666"),
+            color: "#fff", fontSize: 11,
+          }}>{meta?.icon ?? (isApproval ? "⏸" : "?")}</span>
+          <code style={{ background: "var(--gray-soft)", padding: "1px 6px", borderRadius: 4, fontSize: 11 }}>{phase.id}</code>
+          <span style={{ marginLeft: 8, fontSize: 11, color: "var(--text-dim)" }}>
+            {isApproval ? "approval" : (meta?.label ?? taskType)}
+          </span>
+        </div>
+      </div>
+    </button>
+  );
+}
+
 /**
- * Gates panel — deterministic checks (shell tasks, approval, etc.).
+ * Gates panel — validation gates that block Director's mark_done.
+ * Includes shell/CI tasks and approval steps. Director-enforced ci_gate
+ * lives here.
  */
 function GatesPanel({
   wf,
   onSelect,
   onAddTask,
   onAddApproval,
+  onImportPreset,
 }: {
   wf: WorkflowDefinition;
   onSelect: (phaseId: string) => void;
   onAddTask: (type: string) => void;
   onAddApproval: () => void;
+  onImportPreset: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
-  const gates = wf.phases.filter((p) => p.kind === "task" || p.kind === "command" || p.kind === "approval");
+  const gates = wf.phases.filter((p) => {
+    if (p.kind === "approval") return true;
+    if (p.kind === "command") return true; // legacy
+    if (p.kind === "task") {
+      const t = p.task?.type ?? "shell";
+      return TASK_TYPES[t]?.category === "gate";
+    }
+    return false;
+  });
+  const gateTaskTypes = Object.entries(TASK_TYPES).filter(([, m]) => m.category === "gate");
   return (
     <CollapsibleSection
       open={open}
@@ -410,38 +1358,15 @@ function GatesPanel({
           {t("section.gates.empty")}
         </div>
       )}
-      {gates.map((p) => {
-        const taskType = p.kind === "task" ? p.task?.type : p.kind === "approval" ? "approval" : "shell";
-        const meta = TASK_TYPES[taskType ?? "shell"];
-        return (
-          <button
-            key={p.id}
-            onClick={() => onSelect(p.id)}
-            className="row-card"
-            style={{ width: "100%", textAlign: "left" }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-              <div>
-                <span style={{
-                  display: "inline-block", width: 22, height: 22, lineHeight: "22px",
-                  textAlign: "center", borderRadius: 4, marginRight: 8,
-                  background: meta?.color ?? (p.kind === "approval" ? "#f59e0b" : "#666"),
-                  color: "#fff", fontSize: 11,
-                }}>{meta?.icon ?? (p.kind === "approval" ? "⏸" : "?")}</span>
-                <code style={{ background: "var(--gray-soft)", padding: "1px 6px", borderRadius: 4, fontSize: 11 }}>{p.id}</code>
-                <span style={{ marginLeft: 8, fontSize: 11, color: "var(--text-dim)" }}>
-                  {p.kind === "approval" ? "approval" : (meta?.label ?? taskType)}
-                </span>
-              </div>
-            </div>
-          </button>
-        );
-      })}
-      <div style={{ position: "relative", marginTop: 10 }}>
+      {gates.map((p) => <TaskPhaseRow key={p.id} phase={p} onSelect={onSelect} />)}
+      <div style={{ display: "flex", gap: 6, marginTop: 10, position: "relative", flexWrap: "wrap" }}>
+        <button onClick={onImportPreset} className="primary" title="Vyber z hotové sady CI / lint / approval presetů">
+          📦 Použít preset
+        </button>
         <button onClick={() => setAddOpen((o) => !o)}>+ {t("btn.add_gate")}</button>
         {addOpen && (
-          <div className="wf-popover" style={{ position: "absolute", top: "100%", left: 0, marginTop: 4, zIndex: 10 }}>
-            {Object.entries(TASK_TYPES).map(([key, meta]) => (
+          <div className="wf-popover" style={{ position: "absolute", top: "100%", left: "auto", marginTop: 4, zIndex: 10 }}>
+            {gateTaskTypes.map(([key, meta]) => (
               <button
                 key={key}
                 onClick={() => { onAddTask(key); setAddOpen(false); }}
@@ -456,6 +1381,71 @@ function GatesPanel({
             </button>
           </div>
         )}
+      </div>
+    </CollapsibleSection>
+  );
+}
+
+/**
+ * Connectors panel — outbound integrations (GitHub, Jira, SSH, Telegram).
+ * Side-effects only; never gate Director's mark_done. Wire them via
+ * workflow.on_success / on_failure to fire after a run completes.
+ */
+function ConnectorsPanel({
+  wf,
+  onSelect,
+  onAddTask,
+  onImportPreset,
+}: {
+  wf: WorkflowDefinition;
+  onSelect: (phaseId: string) => void;
+  onAddTask: (type: string) => void;
+  onImportPreset: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const connectors = wf.phases.filter((p) => {
+    if (p.kind !== "task") return false;
+    const t = p.task?.type ?? "";
+    return TASK_TYPES[t]?.category === "connector";
+  });
+  const connectorTaskTypes = Object.entries(TASK_TYPES).filter(([, m]) => m.category === "connector");
+
+  return (
+    <CollapsibleSection
+      open={open}
+      onToggle={() => setOpen((o) => !o)}
+      title="Connectors"
+      summary={`${connectors.length} ${connectors.length === 1 ? "integrace" : "integrací"} (Jira, GitHub, SSH, Telegram, Git push)`}
+      icon="🔌"
+    >
+      {connectors.length === 0 && (
+        <div style={{ color: "var(--text-dim)", padding: "8px 0" }}>
+          Žádný konektor. Použij preset, nebo přidej Jira / GitHub / SSH / Git push abys reportoval výsledek runu navenek.
+        </div>
+      )}
+      {connectors.map((p) => <TaskPhaseRow key={p.id} phase={p} onSelect={onSelect} />)}
+      <div style={{ display: "flex", gap: 6, marginTop: 10, position: "relative", flexWrap: "wrap" }}>
+        <button onClick={onImportPreset} className="primary" title="Vyber z hotové sady git_push / approval / CI presetů">
+          📦 Použít preset
+        </button>
+        <button onClick={() => setAddOpen((o) => !o)}>+ Přidat konektor</button>
+        {addOpen && (
+          <div className="wf-popover" style={{ position: "absolute", top: "100%", left: "auto", marginTop: 4, zIndex: 10 }}>
+            {connectorTaskTypes.map(([key, meta]) => (
+              <button
+                key={key}
+                onClick={() => { onAddTask(key); setAddOpen(false); }}
+              >
+                <span className="pop-icon" style={{ background: meta.color }}>{meta.icon}</span>
+                {meta.label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 8, padding: 8, background: "var(--gray-soft)", borderRadius: 4 }}>
+        Konektory se spustí automaticky při ukončení runu. Kdy přesně se vystřelí každá akce řídí trigger uvnitř (always / on success / on failure).
       </div>
     </CollapsibleSection>
   );
@@ -615,7 +1605,11 @@ function SkillAgentEditor({
           🔗 This agent is also used by {sharedCount} other skill{sharedCount === 1 ? "" : "s"} in this project — edits propagate.
         </div>
       )}
-      {showPicker && (
+      {/* Hide the agent picker for library-linked skills — switching agent
+          would silently break the "edits propagate via template" promise.
+          User who wants a different agent must first detach (admin) or
+          import a different library template. */}
+      {showPicker && !fromLibrary && (
         <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12, fontSize: 11, color: "var(--text-dim)" }}>
           <span>Switch agent for this skill:</span>
           <select
@@ -653,15 +1647,28 @@ function SkillAgentEditor({
           <input value={model} disabled={fromLibrary} onChange={(e) => setModel(e.target.value)} placeholder="(default)" />
         </div>
       </div>
-      <div className="form-row">
-        <label>Allowed tools (CSV)</label>
-        <input
-          value={toolsCsv}
-          disabled={fromLibrary}
-          onChange={(e) => setToolsCsv(e.target.value)}
-          placeholder="Read, Edit, Bash, Grep, Glob"
-        />
-      </div>
+      {/* Allowed tools is power-user territory — most agents inherit a
+       *  reasonable default. Tuck behind a `<details>` so the modal stays
+       *  visually clean for the 99% case. Library-linked agents skip this
+       *  block entirely (definition is read-only). */}
+      {!fromLibrary && (
+        <details style={{ marginBottom: 8 }}>
+          <summary style={{ cursor: "pointer", fontSize: 11, color: "var(--text-dim)", padding: "4px 0" }}>
+            Pokročilé: omezit tool sadu
+          </summary>
+          <div className="form-row" style={{ marginTop: 6 }}>
+            <label>Allowed tools (CSV)</label>
+            <input
+              value={toolsCsv}
+              onChange={(e) => setToolsCsv(e.target.value)}
+              placeholder="Read, Edit, Bash, Grep, Glob (prázdné = výchozí sada)"
+            />
+            <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 2 }}>
+              Whitelist toolů co může agent používat. Prázdné = výchozí sada (Read, Edit, Bash, …). Nastav jen když chceš agenta omezit (např. Reviewer = jen Read/Grep).
+            </div>
+          </div>
+        </details>
+      )}
       <div className="form-row">
         <label>
           System prompt
@@ -788,6 +1795,80 @@ function LibrarySkillPicker({
   );
 }
 
+/** Built-in preset picker — mirrors LibrarySkillPicker UX but uses the
+ *  client-side WORKFLOW_PHASE_PRESETS registry instead of a server-backed library.
+ *  Presets are copied into the phase on import (no overlay) — user edits
+ *  per-project after pick. */
+function PresetPickerModal({
+  filter,
+  onClose,
+  onPick,
+}: {
+  filter: WorkflowPhasePreset["category"][];
+  onClose: () => void;
+  onPick: (preset: WorkflowPhasePreset) => void;
+}) {
+  useEscClose(onClose);
+  const visible = WORKFLOW_PHASE_PRESETS.filter((p) => filter.includes(p.category));
+  const byCategory = visible.reduce<Record<string, WorkflowPhasePreset[]>>((acc, p) => {
+    (acc[p.category] = acc[p.category] ?? []).push(p);
+    return acc;
+  }, {});
+  const CATEGORY_META: Record<WorkflowPhasePreset["category"], { label: string; icon: string }> = {
+    ci: { label: "CI & lint gates", icon: "🛡" },
+    git: { label: "Git push", icon: "↑" },
+    approval: { label: "Human approval", icon: "⏸" },
+    deploy: { label: "Deploy & ops", icon: "🚀" },
+  };
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" role="dialog" aria-modal="true" style={{ width: 720, maxHeight: "80vh", overflow: "auto" }} onClick={(e) => e.stopPropagation()}>
+        <h3 style={{ marginTop: 0 }}>📦 Vyber preset</h3>
+        <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 12 }}>
+          Hotové konfigurace pro běžné případy. Po importu si je můžeš upravit per-projekt — žádné live napojení na knihovnu, žádná synchronizace zpět.
+        </div>
+        {Object.entries(byCategory).map(([cat, presets]) => {
+          const meta = CATEGORY_META[cat as WorkflowPhasePreset["category"]];
+          return (
+            <div key={cat} style={{ marginBottom: 18 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", color: "var(--text-dim)", marginBottom: 8 }}>
+                {meta.icon} {meta.label}
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {presets.map((p) => (
+                  <button
+                    key={p.key}
+                    onClick={() => onPick(p)}
+                    style={{
+                      display: "block",
+                      width: "100%",
+                      textAlign: "left",
+                      padding: "10px 12px",
+                      border: "1px solid var(--border)",
+                      borderRadius: 6,
+                      background: "var(--bg-elevated)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4 }}>{p.label}</div>
+                    <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>{p.description}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+        {visible.length === 0 && (
+          <div style={{ color: "var(--text-dim)", fontSize: 12 }}>(žádné presety pro tuhle sekci)</div>
+        )}
+        <div className="form-actions">
+          <button onClick={onClose}>Zavřít</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CollapsibleSection({
   open,
   onToggle,
@@ -848,11 +1929,20 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
   // the prompt/role/model/tools (or library lock banner). "advanced"
   // surfaces the legacy graph-flow hints.
   const [phaseModalTab, setPhaseModalTab] = useState<"skill" | "agent" | "advanced">("skill");
-  // Reset to first tab when a different phase opens, so the user always
-  // lands on the same default view.
-  useEffect(() => { setPhaseModalTab("skill"); }, [selectedPhaseId]);
+  /** Connector phases use their own two-tab layout (connection / actions)
+   *  independent of the Skill modal's tabs. Reset alongside selectedPhaseId.
+   *  Default to "connection" — credentials/host/repo come first; actions
+   *  reference them. Opening the modal on Actions hid the port field for SSH
+   *  users who didn't realise there was a Connection tab. */
+  const [connectorTab, setConnectorTab] = useState<"connection" | "actions">("connection");
+  useEffect(() => {
+    setPhaseModalTab("skill");
+    setConnectorTab("connection");
+  }, [selectedPhaseId]);
   // Library picker — pulls global Skill templates from admin.
   const [showLibraryPicker, setShowLibraryPicker] = useState(false);
+  /** When non-null, opens the preset picker filtered to these categories. */
+  const [presetPickerFilter, setPresetPickerFilter] = useState<WorkflowPhasePreset["category"][] | null>(null);
   const [libraryTemplates, setLibraryTemplates] = useState<AgentTemplate[]>([]);
   useEffect(() => {
     if (!showLibraryPicker) return;
@@ -995,6 +2085,34 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
     });
   }
 
+  /** Drop a built-in WorkflowPhasePreset into the workflow. Phase config is
+   *  copied in (no live overlay to the preset definition — user can edit
+   *  freely after import). If a phase with the same id already exists, append
+   *  a suffix. */
+  function addFromPreset(preset: WorkflowPhasePreset) {
+    updateWf((next) => {
+      const existingIds = new Set(next.phases.map((p) => p.id));
+      let id = preset.phase.id;
+      let suffix = 2;
+      while (existingIds.has(id)) {
+        id = `${preset.phase.id}_${suffix++}`;
+      }
+      const xs = next.phases.map((p) => p.position?.x ?? 0).concat([0]);
+      const x = Math.max(...xs) + 240;
+      const y = 120;
+      next.phases.push({
+        id,
+        kind: preset.phase.kind,
+        ...(preset.phase.notes ? { notes: preset.phase.notes } : {}),
+        ...(preset.phase.task ? { task: { type: preset.phase.task.type, config: { ...preset.phase.task.config } } } : {}),
+        ...(preset.phase.approval ? { approval: { ...preset.phase.approval } } : {}),
+        next: null,
+        position: { x, y },
+      });
+      setSelectedPhaseId(id);
+    });
+  }
+
   function deletePhase(id: string) {
     updateWf((next) => {
       next.phases = next.phases.filter((p) => p.id !== id);
@@ -1076,6 +2194,13 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
         onSelect={(id) => setSelectedPhaseId(id)}
         onAddTask={addTaskPhase}
         onAddApproval={addApprovalPhase}
+        onImportPreset={() => setPresetPickerFilter(["ci", "approval"])}
+      />
+      <ConnectorsPanel
+        wf={wf}
+        onSelect={(id) => setSelectedPhaseId(id)}
+        onAddTask={addTaskPhase}
+        onImportPreset={() => setPresetPickerFilter(["git", "deploy"])}
       />
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4, flexWrap: "wrap" }}>
         <button onClick={save} disabled={busy || !dirty} className={dirty ? "primary" : ""}>
@@ -1119,7 +2244,14 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
           <div className="phase-modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             <div className="phase-modal-header">
               <h3>
-                {getTaskKindForPhase(selected) !== null ? "Gate" : selected.kind === "approval" ? "Approval" : "Skill"}
+                {(() => {
+                  const tk = getTaskKindForPhase(selected);
+                  if (tk !== null) {
+                    const meta = TASK_TYPES[tk];
+                    return meta?.category === "connector" ? "Connector" : "Gate";
+                  }
+                  return selected.kind === "approval" ? "Approval" : "Skill";
+                })()}
                 <code style={{ background: "var(--gray-soft)", padding: "2px 8px", borderRadius: 6, fontSize: 13 }}>{selected.id}</code>
                 {fromLibrary && <span style={{
                   marginLeft: 8, fontSize: 10, padding: "1px 6px", borderRadius: 8,
@@ -1172,6 +2304,11 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
             </div>
             )}
             {(!isAgentSkill || tab === "skill") && selected.kind !== "director" && (() => {
+              // Connectors aren't part of the Director's skill graph (they
+              // auto-fire at terminal). Hide the category dropdown — it adds
+              // confusion without functional value.
+              const tk = getTaskKindForPhase(selected);
+              if (tk && TASK_TYPES[tk]?.category === "connector") return null;
               const derived = deriveSkillCategory(selected, selectedAgent ? { name: selectedAgent.name, role: selectedAgent.role } : null);
               return (
                 <div className="form-row">
@@ -1282,31 +2419,61 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
                   You'll see Approve / Reject buttons in the run view. Reject bounces to <code>retry_target</code> (if set).
                 </div>
               </div>
-            ) : getTaskKindForPhase(selected) !== null ? (
-              <TaskFormSection
-                phase={selected}
-                onChangeType={(type) => {
-                  const meta = TASK_TYPES[type];
-                  updatePhase(selected.id, {
-                    kind: "task",
-                    task: { type, config: meta?.defaultConfig ?? {} },
-                    command: undefined,
-                    working_dir: undefined,
-                    timeout_sec: undefined,
-                  });
-                }}
-                onChangeConfig={(config) => {
-                  const type = getTaskKindForPhase(selected) ?? "shell";
-                  updatePhase(selected.id, {
-                    kind: "task",
-                    task: { type, config },
-                    command: undefined,
-                    working_dir: undefined,
-                    timeout_sec: undefined,
-                  });
-                }}
-              />
-            ) : (
+            ) : getTaskKindForPhase(selected) !== null ? (() => {
+              const tk = getTaskKindForPhase(selected) ?? "shell";
+              const isConnector = TASK_TYPES[tk]?.category === "connector";
+              const taskForm = (
+                <TaskFormSection
+                  phase={selected}
+                  connectorTab={isConnector ? connectorTab : "all"}
+                  onChangeType={(type) => {
+                    const meta = TASK_TYPES[type];
+                    updatePhase(selected.id, {
+                      kind: "task",
+                      task: { type, config: meta?.defaultConfig ?? {} },
+                      command: undefined,
+                      working_dir: undefined,
+                      timeout_sec: undefined,
+                    });
+                  }}
+                  onChangeConfig={(config) => {
+                    const type = getTaskKindForPhase(selected) ?? "shell";
+                    updatePhase(selected.id, {
+                      kind: "task",
+                      task: { type, config },
+                      command: undefined,
+                      working_dir: undefined,
+                      timeout_sec: undefined,
+                    });
+                  }}
+                />
+              );
+              if (!isConnector) return taskForm;
+              // Single-action connectors (git_push, telegram) have no per-action
+              // list — render the form without the Připojení/Akce split because
+              // there's literally nothing under "Akce" to show.
+              const hasActionList = selected.task?.type === "github"
+                || selected.task?.type === "jira"
+                || selected.task?.type === "ssh";
+              if (!hasActionList) return taskForm;
+              return (
+                <>
+                  <div className="phase-modal-tabs" role="tablist" style={{ marginTop: 4 }}>
+                    <button
+                      type="button" role="tab" aria-selected={connectorTab === "connection"}
+                      className={`phase-modal-tab ${connectorTab === "connection" ? "active" : ""}`}
+                      onClick={() => setConnectorTab("connection")}
+                    >Připojení</button>
+                    <button
+                      type="button" role="tab" aria-selected={connectorTab === "actions"}
+                      className={`phase-modal-tab ${connectorTab === "actions" ? "active" : ""}`}
+                      onClick={() => setConnectorTab("actions")}
+                    >Akce</button>
+                  </div>
+                  {taskForm}
+                </>
+              );
+            })() : (
               <>
                 {tab === "skill" && (
                   <SkillAgentEditor
@@ -1431,6 +2598,17 @@ export function WorkflowEditor({ project, tickets, onChanged }: Props) {
           onSaved={(t) => {
             setShowSaveTemplate(false);
             setInfo(`Saved template "${t.name}" (${t.key}).`);
+          }}
+        />
+      )}
+      {presetPickerFilter && (
+        <PresetPickerModal
+          filter={presetPickerFilter}
+          onClose={() => setPresetPickerFilter(null)}
+          onPick={(preset) => {
+            addFromPreset(preset);
+            setPresetPickerFilter(null);
+            setInfo(`📦 Imported preset "${preset.label}".`);
           }}
         />
       )}

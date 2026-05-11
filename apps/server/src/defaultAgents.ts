@@ -391,35 +391,6 @@ End with ONLY a JSON object on the LAST line of your response (no fences):
 
 Both \`add\` and \`remove_matching\` are optional. Empty arrays mean no change.`;
 
-const CLOSER = `You are the Closer — the FINAL ACCEPTANCE GATE. The team produced a diff, Reviewer signed off on code quality, Tester ran tests. **Your one job: does this diff deliver what the ticket explicitly asked for? No more, no less.**
-
-This is a STRICT, BLOCKING check — not advisory. If anything the ticket asked for is missing or only partially delivered, bounce it back. Do not rubber-stamp.
-
-You may use Read, Grep, Glob, and Bash (read-only: \`git log\`, \`git show\`, \`git diff\`). **Do NOT edit, write, or commit anything.**
-
-Required check:
-- Does the diff implement EVERY acceptance criterion stated or implied in the ticket?
-- Are there OBVIOUS GAPS (ticket asks for "endpoint + tests", diff has only endpoint → gap, ok=false)?
-- Did scope creep happen? (Diff does extra things not requested → mention as minor, but ok can still be true if asked-for parts are complete.)
-
-You are NOT re-reviewing code style or running tests — Reviewer and Tester already did. You ONLY verify completeness against the ticket's intent.
-
-End with ONLY a JSON object on the LAST line (no fences):
-{
-  "ok": true | false,
-  "summary": "<2-4 sentences: what was delivered vs. what was asked>",
-  "issues": [
-    { "severity": "blocker" | "major" | "minor", "file": "<path?>", "message": "<concrete missing piece>" }
-  ]
-}
-
-Rules of thumb:
-- Ticket asks for X and Y, diff has only X → ok=false (Y is missing).
-- Ticket vague ("improve the orders endpoint"), diff makes a sensible improvement → ok=true.
-- Diff has obvious quality bugs Reviewer missed → not your call; ok=true and let Reviewer learn.
-- Diff is empty or only touches unrelated files → ok=false (didn't do the work).
-
-If ok=true, the orchestrator marks the ticket as DONE without human review. Be honest.`;
 
 const LINT_GATE = `You are the Lint / Static-Analysis Gate. You verify that the diff passes ALL the project's quality checks: linters, formatters, static analyzers, type-checkers. **No errors. No warnings. No suppressions added in this run.**
 
@@ -650,17 +621,11 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     allowed_tools: ["Read", "Grep", "Glob", "Bash"],
     core: true,
   },
-  {
-    key: "closer",
-    name: "Closer",
-    role: "reviewer",
-    category: "Strategy",
-    description: "Final acceptance check: does the delivered diff match the ticket's intent?",
-    system_prompt: CLOSER,
-    model: "claude-sonnet-4-6",
-    allowed_tools: ["Read", "Grep", "Glob", "Bash"],
-    core: true,
-  },
+  // "Closer" template removed — Director already enforces ci_gate before
+  // mark_done (code-level guardrail in director.ts) and prompts for Reviewer
+  // on non-trivial tickets, so a separate Closer dispatch was redundant LLM
+  // cost. Existing projects that still have a Closer skill keep it until the
+  // user deletes it from the project.
   {
     key: "memory_curator",
     name: "Memory Curator",
