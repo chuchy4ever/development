@@ -59,31 +59,29 @@ export function RunView({ runId, onClose }: Props) {
     const EVENT_CAP = 5000;
     const queue: UiEvent[] = [];
     let flushTimer: number | null = null;
-    // Track seen ids in a Set we *carry* across flushes — O(1) dedup instead
-    // of rebuilding from prev.map() on every batch.
-    const seenIds = new Set<number>();
     const flush = () => {
       flushTimer = null;
       if (queue.length === 0) return;
       const batch = queue.splice(0, queue.length);
-      const fresh = batch.filter((e) => {
-        if (seenIds.has(e.id)) return false;
-        seenIds.add(e.id);
-        return true;
-      });
-      if (fresh.length === 0) return;
       setEvents((prev) => {
-        const merged = prev.length + fresh.length <= EVENT_CAP
-          ? [...prev, ...fresh]
-          : [...prev, ...fresh].slice(-EVENT_CAP);
-        // Trim seenIds in step with the trimmed events array so it doesn't
-        // leak memory across a long-running session.
-        if (merged.length === EVENT_CAP) {
-          const keep = new Set<number>();
-          for (const e of merged) keep.add(e.id);
-          for (const id of seenIds) if (!keep.has(id)) seenIds.delete(id);
+        // Dedup by event id over the full prev + batch — independent of any
+        // closure-local Set so it survives React StrictMode double-mount,
+        // EventSource auto-reconnect (which replays from since=0 each time),
+        // or any other path that could resend already-seen events.
+        const seen = new Set<number>();
+        const out: UiEvent[] = [];
+        for (const e of prev) {
+          if (typeof e.id !== "number" || seen.has(e.id)) continue;
+          seen.add(e.id);
+          out.push(e);
         }
-        return merged;
+        for (const e of batch) {
+          if (typeof e.id !== "number" || seen.has(e.id)) continue;
+          seen.add(e.id);
+          out.push(e);
+        }
+        // Cap memory on very long runs — keep the most recent EVENT_CAP events.
+        return out.length <= EVENT_CAP ? out : out.slice(-EVENT_CAP);
       });
     };
 
