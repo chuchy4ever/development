@@ -608,6 +608,54 @@ function enforceGuardrails(
       }
     }
   }
+  // 1c) give_up blocked when the work is essentially done. Director isn't
+  //     allowed to abandon a run if ci_gate is green and there's a concrete
+  //     next step (git_push or mark_done) it hasn't tried. Common failure
+  //     mode this catches: Director sees a flaky retry, gets pessimistic,
+  //     and gives up despite the work being one turn from delivery.
+  if (action.action === "give_up") {
+    // Find most recent shell ci_gate result (the canonical CI), and the
+    // most recent git_push gate result (when configured).
+    let lastShellCiGreen: TurnRecord | null = null;
+    let lastGitPushOutcome: TurnRecord | null = null;
+    for (let i = history.length - 1; i >= 0; i--) {
+      const t = history[i]!;
+      if (t.outcome.kind === "ci_gate" && t.outcome.ok === true && (t.outcome.task_type === "shell" || t.outcome.task_type === undefined)) {
+        if (lastShellCiGreen === null) lastShellCiGreen = t;
+      }
+      if (t.outcome.kind === "ci_gate" && t.outcome.task_type === "git_push") {
+        if (lastGitPushOutcome === null) lastGitPushOutcome = t;
+      }
+    }
+    const hasGitPushGate = project.workflow.phases.some(
+      (p) => p.kind === "task" && p.task?.type === "git_push",
+    );
+    if (lastShellCiGreen) {
+      if (hasGitPushGate) {
+        const gitPushTriedAfterCi =
+          lastGitPushOutcome !== null && lastGitPushOutcome.iteration > lastShellCiGreen.iteration;
+        const lastGitPushOk =
+          lastGitPushOutcome !== null
+          && lastGitPushOutcome.outcome.kind === "ci_gate"
+          && lastGitPushOutcome.outcome.ok === true
+          && lastGitPushOutcome.iteration > lastShellCiGreen.iteration;
+        if (!gitPushTriedAfterCi) {
+          return {
+            reason: `give_up blocked: ci_gate passed (turn ${lastShellCiGreen.iteration}) and git_push hasn't been attempted since. Work is committed in the worktree — run \`run_playbook_phase git_push\` to land it, then mark_done. If git_push then fails persistently, give_up with the SPECIFIC push error.`,
+          };
+        }
+        if (lastGitPushOk) {
+          return {
+            reason: `give_up blocked: ci_gate is green AND git_push succeeded (turn ${lastGitPushOutcome.iteration}). The work is on origin. Just mark_done.`,
+          };
+        }
+      } else {
+        return {
+          reason: `give_up blocked: ci_gate passed (turn ${lastShellCiGreen.iteration}) and no git_push gate is configured. Nothing else to verify — mark_done now.`,
+        };
+      }
+    }
+  }
   // 2) mark_done requires at least one successful ci_gate (any phase tagged
   //    or the canonical run_ci_gate action) in this run.
   if (action.action === "mark_done") {
