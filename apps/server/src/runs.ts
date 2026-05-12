@@ -122,6 +122,37 @@ export async function startRun({ project, ticket }: StartRunInput): Promise<stri
     throw new Error("no matching repos for this ticket");
   }
 
+  // Preflight: a run needs at least one dispatchable coder. Without one
+  // Director can only spin until give_up — better to fail fast with a
+  // pointing-at-the-problem error than burn iterations on a doomed run.
+  // Mirrors resolveAvailableSubagents: an agent is dispatchable when it's
+  // referenced by a workflow phase (kind=agent, agent_id set); if no phases
+  // reference agents, fall back to all project agents (fresh-project safety).
+  const phases = project.workflow?.phases ?? [];
+  const wiredAgentIds = new Set(
+    phases.filter((p) => p.kind === "agent" && p.agent_id).map((p) => p.agent_id as string),
+  );
+  const dispatchable = wiredAgentIds.size > 0
+    ? project.agents.filter((a) => wiredAgentIds.has(a.id))
+    : project.agents;
+  const coders = dispatchable.filter((a) => a.role === "coder");
+  if (coders.length === 0) {
+    const totalAgents = project.agents.length;
+    if (totalAgents === 0) {
+      throw new Error(
+        "Projekt nemá žádné agenty. Přidej alespoň jednoho codera (např. PHP Junior Coder z knihovny šablon) a propoj ho do workflow.",
+      );
+    }
+    if (wiredAgentIds.size === 0) {
+      throw new Error(
+        `Workflow je prázdné (žádné agent phases). Projekt má ${totalAgents} agentů, ale žádný není propojený do workflow — otevři Workflow Editor a přidej phases.`,
+      );
+    }
+    throw new Error(
+      "Workflow nemá žádného coder agenta (role=coder). Přidej do workflow alespoň jednoho codera (Junior/Senior PHP, Drupal Junior/Senior, ...) — Reviewer a Tester sami nepostaví diff.",
+    );
+  }
+
   const runId = nanoid(10);
   const slug = ticket.title
     .toLowerCase()
