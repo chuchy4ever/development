@@ -134,15 +134,23 @@ function drupalTeamTemplate(): WorkflowPreset {
     key: "drupal-team",
     name: "Drupal team",
     description:
-      "Single Drupal Coder owns the diff end-to-end (no Junior/Senior split — Drupal work is too framework-specific to bisect). Reviewer + Tester after, with CI gate.",
+      "Junior writes the bulk; Senior is the escalation, fixes cacheability / config schema / security gaps. Reviewer retries to Senior on issues.",
     source: "builtin",
     agents: [
       {
-        name: "Drupal Coder",
+        name: "Drupal Junior Coder",
         role: "coder",
         category: "Development",
-        system_prompt: promptByKey("drupal_coder"),
-        model: "claude-sonnet-4-6",
+        system_prompt: promptByKey("drupal_junior"),
+        model: "claude-haiku-4-5-20251001",
+        allowed_tools: null,
+      },
+      {
+        name: "Drupal Senior Coder",
+        role: "coder",
+        category: "Development",
+        system_prompt: promptByKey("drupal_senior"),
+        model: "claude-opus-4-7",
         allowed_tools: null,
       },
       {
@@ -163,8 +171,9 @@ function drupalTeamTemplate(): WorkflowPreset {
       },
     ],
     phases: [
-      { id: "drupal", agent_name: "Drupal Coder", next: "reviewer", position: { x: 240, y: 240 } },
-      { id: "reviewer", agent_name: "Reviewer", next: "ci_gate", retry_target: "drupal", max_attempts: 2, position: { x: 420, y: 240 } },
+      { id: "drupal_junior", agent_name: "Drupal Junior Coder", next: "drupal_senior", position: { x: 240, y: 240 } },
+      { id: "drupal_senior", agent_name: "Drupal Senior Coder", next: "reviewer", position: { x: 420, y: 240 } },
+      { id: "reviewer", agent_name: "Reviewer", next: "ci_gate", retry_target: "drupal_senior", max_attempts: 2, position: { x: 600, y: 240 } },
       {
         id: "ci_gate",
         kind: "task",
@@ -176,11 +185,11 @@ function drupalTeamTemplate(): WorkflowPreset {
           },
         },
         next: "tester",
-        retry_target: "drupal",
+        retry_target: "drupal_senior",
         max_attempts: 2,
-        position: { x: 600, y: 240 },
+        position: { x: 780, y: 240 },
       },
-      { id: "tester", agent_name: "Tester", next: null, retry_target: "drupal", max_attempts: 2, position: { x: 780, y: 240 } },
+      { id: "tester", agent_name: "Tester", next: null, retry_target: "drupal_senior", max_attempts: 2, position: { x: 960, y: 240 } },
     ],
     project_specifics:
       "Drupal project. Custom code in web/modules/custom/. PSR-12 + Drupal coding standards. declare(strict_types=1) at the top of every PHP file. Services with DI rather than \\Drupal::service() in hooks. Configuration management via drush cex; never edit core or contrib (patches go in composer.json).",

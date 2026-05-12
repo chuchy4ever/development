@@ -87,7 +87,7 @@ export const coderAgent: AgentSpec = {
       : "";
     return `${base}\n\n---\n\nImplement this ticket. Commit your work.${diff}${retry}`;
   },
-  // Coder agents may optionally output a verdict (e.g. Senior Coder); if no JSON
+  // Coder agents may optionally output a verdict (e.g. PHP Senior Coder); if no JSON
   // is found, parseVerdict returns null and the engine treats the phase as ok.
   parseVerdict: (text) => extractJsonBlock<ReviewVerdict>(text),
 };
