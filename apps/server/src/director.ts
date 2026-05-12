@@ -656,18 +656,25 @@ function enforceGuardrails(
       }
     }
   }
-  // 2) mark_done requires at least one successful ci_gate (any phase tagged
-  //    or the canonical run_ci_gate action) in this run.
+  // 2) mark_done requires at least one successful ci_gate IF the workflow
+  //    actually has one configured. Projects without a shell-task CI gate
+  //    (e.g. infra-only or experiment workflows) skip this entirely —
+  //    Director can mark_done as soon as the agents are done.
   if (action.action === "mark_done") {
-    const ciGreen = history.some((t) =>
-      t.outcome.kind === "ci_gate"
-      && t.outcome.ok === true
-      && (t.outcome.task_type === "shell" || t.outcome.task_type === undefined),
+    const hasCiGate = project.workflow.phases.some(
+      (p) => p.kind === "task" && p.task?.type === "shell",
     );
-    if (!ciGreen) {
-      return {
-        reason: `mark_done blocked: no successful ci_gate in this run. Run ci_gate (or run_playbook_phase ci_gate) and confirm it passed before marking done.`,
-      };
+    if (hasCiGate) {
+      const ciGreen = history.some((t) =>
+        t.outcome.kind === "ci_gate"
+        && t.outcome.ok === true
+        && (t.outcome.task_type === "shell" || t.outcome.task_type === undefined),
+      );
+      if (!ciGreen) {
+        return {
+          reason: `mark_done blocked: no successful ci_gate in this run. Run ci_gate (or run_playbook_phase ci_gate) and confirm it passed before marking done.`,
+        };
+      }
     }
     // 3) If workflow has a git_push gate configured, the LAST git_push
     //    attempt must have succeeded. Push IS done — code that didn't reach
