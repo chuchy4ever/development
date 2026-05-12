@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import type { Run } from "@ceo/shared";
 import { api, streamRunEvents } from "../api";
 import { t, useLang } from "../i18n";
@@ -105,7 +105,24 @@ export function RunView({ runId, onClose }: Props) {
     logEnd.current?.scrollIntoView({ behavior: "smooth" });
   }, [events.length]);
 
-  const diffs = useMemo(() => events.filter((e) => e.type === "diff"), [events]);
+  // Diffs: the engine emits one per repo per phase_end and re-emits the full
+  // set on each restart (tsx watch reload). Dedupe to latest-per-repo so the
+  // tab count + view both show the actual final state, not N stale snapshots.
+  const diffs = useMemo(() => {
+    const all = events.filter((e) => e.type === "diff");
+    const latest = new Map<string, UiEvent>();
+    for (const d of all) {
+      const repo = String(d.payload?.repo_name ?? "");
+      if (!repo) continue;
+      const prev = latest.get(repo);
+      if (!prev || new Date(d.ts).getTime() > new Date(prev.ts).getTime()) {
+        latest.set(repo, d);
+      }
+    }
+    return [...latest.values()].sort((a, b) =>
+      String(a.payload?.repo_name ?? "").localeCompare(String(b.payload?.repo_name ?? "")),
+    );
+  }, [events]);
   const [actionBusy, setActionBusy] = useState(false);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   /** Clicking a TeamFlowHeader pill filters LogView to only events from that
@@ -576,6 +593,23 @@ type AgentStat = {
   commits: number;
 };
 
+/** Display name for sub-agents in the breakdown. Most are real agent names
+ *  ("PHP Senior Coder") and pass through. Built-in gates like ci_gate and
+ *  task-routed phases (task:git_push) get a friendlier label. */
+function prettifyAgentName(raw: string): string {
+  if (raw === "ci_gate") return "CI gate";
+  if (raw === "parallel") return "Parallel batch";
+  if (raw.startsWith("task:")) {
+    const id = raw.slice("task:".length);
+    if (id === "git_push") return "Git push";
+    return id.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+  if (raw.startsWith("fetch_context:")) {
+    return `Fetch context (${raw.slice("fetch_context:".length)})`;
+  }
+  return raw;
+}
+
 function AgentBreakdown({ events }: { events: UiEvent[] }) {
   const { stats, totalCost } = useMemo(() => {
     type S = AgentStat & { pending: { startedAt: number } | null };
@@ -642,7 +676,7 @@ function AgentBreakdown({ events }: { events: UiEvent[] }) {
                   background: s.role === "coder" ? "var(--cat-coding)" : s.role === "reviewer" ? "var(--cat-review)" : s.role === "tester" ? "var(--cat-validation)" : s.role === "" ? "var(--cat-planning)" : "var(--cat-general)",
                   flex: "0 0 auto",
                 }} />
-                <b style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</b>
+                <b style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{prettifyAgentName(s.name)}</b>
                 {s.model && <span style={{ color: "var(--text-dim)", fontSize: 10 }}>· {s.model.split("-").slice(1, 3).join("-")}</span>}
               </div>
               <span title="dispatches" style={{ textAlign: "right" }}>
@@ -1062,6 +1096,7 @@ function summarizeInput(input: any): string {
 }
 
 function DiffView({ diffs }: { diffs: UiEvent[] }) {
+  // RunView already deduped to latest-per-repo, so render as-is.
   if (diffs.length === 0) {
     return <div style={{ color: "var(--text-dim)", padding: 20 }}>{t("run.no_diff")}</div>;
   }
@@ -1070,21 +1105,72 @@ function DiffView({ diffs }: { diffs: UiEvent[] }) {
       {diffs.map((d) => (
         <div key={d.id} style={{ marginBottom: 16 }}>
           <h4 style={{ margin: "0 0 8px" }}>{d.payload?.repo_name}</h4>
-          <pre style={{
-            background: "var(--bg)",
-            border: "1px solid var(--border)",
-            borderRadius: 6,
-            padding: 12,
-            fontSize: 12,
-            overflow: "auto",
-            margin: 0,
-            maxHeight: "60vh",
-          }}>{d.payload?.diff || "(no changes)"}</pre>
+          <DiffPre raw={String(d.payload?.diff ?? "")} />
         </div>
       ))}
     </div>
   );
 }
+
+/** Render a unified diff with git-style color overlay:
+ *   - file headers (`diff --git`, `index`, `---`, `+++`) muted
+ *   - hunk headers (`@@`) accent-colored
+ *   - additions (`+`) green background
+ *   - deletions (`-`) red background
+ *   - context lines neutral
+ *  Single <pre> with per-line spans — keeps copy-to-clipboard intact and
+ *  preserves whitespace exactly. */
+function DiffPre({ raw }: { raw: string }) {
+  if (!raw.trim()) {
+    return (
+      <pre style={diffPreBaseStyle}>{"(no changes)"}</pre>
+    );
+  }
+  const lines = raw.split("\n");
+  return (
+    <pre style={diffPreBaseStyle}>
+      {lines.map((line, i) => {
+        let bg = "transparent";
+        let color = "var(--text)";
+        if (line.startsWith("+++") || line.startsWith("---")) {
+          color = "var(--text-dim)";
+        } else if (line.startsWith("diff --git") || line.startsWith("index ") || line.startsWith("new file mode") || line.startsWith("deleted file mode") || line.startsWith("similarity index") || line.startsWith("rename ")) {
+          color = "var(--text-dim)";
+        } else if (line.startsWith("@@")) {
+          color = "#7c5cff";
+          bg = "rgba(124, 92, 255, 0.08)";
+        } else if (line.startsWith("+")) {
+          bg = "rgba(34, 197, 94, 0.15)";
+          color = "#15803d";
+        } else if (line.startsWith("-")) {
+          bg = "rgba(239, 68, 68, 0.15)";
+          color = "#b91c1c";
+        }
+        return (
+          <span
+            key={i}
+            style={{ display: "block", background: bg, color, padding: "0 4px", marginLeft: -4, marginRight: -4 }}
+          >
+            {line || " "}
+          </span>
+        );
+      })}
+    </pre>
+  );
+}
+
+const diffPreBaseStyle: CSSProperties = {
+  background: "var(--bg)",
+  border: "1px solid var(--border)",
+  borderRadius: 6,
+  padding: "8px 0",
+  fontSize: 12,
+  overflow: "auto",
+  margin: 0,
+  maxHeight: "60vh",
+  fontFamily: "ui-monospace, SFMono-Regular, monospace",
+  lineHeight: 1.45,
+};
 
 /** Three-button verdict bar shown on completed runs. The chosen verdict
  *  highlights; clicking again clears it. Bad / broken_in_prod prompt for a

@@ -58,7 +58,8 @@ export interface DirectorResult {
    *  so the user can extend budget (approve) or cancel (reject). */
   paused?:
     | { reason: "budget_exhausted"; budget_usd: number }
-    | { reason: "human_review"; question: string; rationale: string };
+    | { reason: "human_review"; question: string; rationale: string }
+    | { reason: "max_iterations"; iterations: number; max_iterations: number };
 }
 
 // ---- Decision schema --------------------------------------------------------
@@ -305,7 +306,7 @@ function rebuildHistoryFromEvents(
 
 // ---- Constants --------------------------------------------------------------
 
-const DEFAULT_MAX_ITERATIONS = 12;
+const DEFAULT_MAX_ITERATIONS = 25;
 const DEFAULT_BUDGET_USD = 20;
 const DIRECTOR_MODEL = "claude-sonnet-4-6";
 const SUBAGENT_BLACKLIST = new Set(["CTO", "Memory Curator", "Director"]);
@@ -318,12 +319,12 @@ const MAX_DISPATCHES_PER_SUBAGENT = 4;
 
 export async function runDirectorPhase(args: DirectorRunArgs): Promise<DirectorResult> {
   const cfg = (args.phase.director ?? args.project.workflow.director_config ?? {}) as DirectorConfig;
-  const maxIter = cfg.max_iterations ?? DEFAULT_MAX_ITERATIONS;
-  // Per-run budget override takes precedence (set when user approves a budget
-  // extension after a paused run). Falls back to project config, then default.
+  // Per-run overrides (set when user approves an extension after a paused run)
+  // take precedence over project config, which takes precedence over defaults.
   const overrideRow = db
-    .prepare("SELECT director_budget_override_usd FROM runs WHERE id = ?")
-    .get(args.runId) as { director_budget_override_usd: number | null } | undefined;
+    .prepare("SELECT director_budget_override_usd, director_max_iter_override FROM runs WHERE id = ?")
+    .get(args.runId) as { director_budget_override_usd: number | null; director_max_iter_override: number | null } | undefined;
+  const maxIter = overrideRow?.director_max_iter_override ?? cfg.max_iterations ?? DEFAULT_MAX_ITERATIONS;
   const budget =
     overrideRow?.director_budget_override_usd ?? cfg.budget_usd ?? DEFAULT_BUDGET_USD;
 
@@ -494,8 +495,22 @@ export async function runDirectorPhase(args: DirectorRunArgs): Promise<DirectorR
     return { ok: false, summary: `Unknown action`, iterations: iter, total_cost_usd: totalCost };
   }
 
-  args.emit("director_end", { reason: "max_iterations", iterations: iter, total_cost_usd: totalCost });
-  return { ok: false, summary: `Max iterations (${maxIter}) reached`, iterations: iter, total_cost_usd: totalCost };
+  // Out of iterations. Don't fail — pause as awaiting_approval so the user
+  // can extend by +10 iterations and let Director finish (typically just
+  // git_push + mark_done when CI is already green). Same UX as budget pause.
+  args.emit("director_paused", {
+    reason: "max_iterations",
+    iterations: iter,
+    max_iterations: maxIter,
+    total_cost_usd: totalCost,
+  });
+  return {
+    ok: false,
+    summary: `Paused: hit max iterations (${maxIter}). Approve to extend by +10 and finish; reject to cancel.`,
+    iterations: iter,
+    total_cost_usd: totalCost,
+    paused: { reason: "max_iterations", iterations: iter, max_iterations: maxIter },
+  };
 }
 
 // ---- Guardrails -------------------------------------------------------------
@@ -536,6 +551,29 @@ function enforceGuardrails(
       };
     }
   }
+  // 1a) Junior escalation: after 3 Junior dispatches with at least one
+  //     failed ci_gate in the history, force escalation to Senior. Director's
+  //     prompt asks for the same but Director keeps re-dispatching Junior on
+  //     trivial-looking PHPStan / lint errors that prove to be deeper than
+  //     they look. This hard cap breaks the loop without waiting for the
+  //     4× total cap. Identifies Junior by role=coder + name containing
+  //     "Junior" (works for both "PHP Junior Coder" and bare "Junior Coder").
+  if (targetName) {
+    const targetAgent = project.agents.find((a) => a.name === targetName);
+    if (targetAgent?.role === "coder" && /junior/i.test(targetName)) {
+      const juniorDispatches = history.filter(
+        (t) => t.outcome.kind === "subagent" && t.outcome.subagent === targetName,
+      ).length;
+      const ciFailures = history.filter(
+        (t) => t.outcome.kind === "ci_gate" && t.outcome.ok === false,
+      ).length;
+      if (juniorDispatches >= 3 && ciFailures >= 1) {
+        return {
+          reason: `"${targetName}" already dispatched ${juniorDispatches}× and ci_gate has failed ${ciFailures}× — Junior had its shot at fixing CI. Escalate to a Senior-role coder (deeper expertise) or give_up with a concrete blocker. Don't re-dispatch Junior on the same failure.`,
+        };
+      }
+    }
+  }
   // 1b) dispatch_parallel: enforce read-only sub-agents (role=reviewer) only,
   //     reject empty / >4 targets, and apply per-subagent cap to each target.
   if (action.action === "dispatch_parallel") {
@@ -570,18 +608,73 @@ function enforceGuardrails(
       }
     }
   }
-  // 2) mark_done requires at least one successful ci_gate (any phase tagged
-  //    or the canonical run_ci_gate action) in this run.
-  if (action.action === "mark_done") {
-    const ciGreen = history.some((t) =>
-      t.outcome.kind === "ci_gate"
-      && t.outcome.ok === true
-      && (t.outcome.task_type === "shell" || t.outcome.task_type === undefined),
+  // 1c) give_up blocked when the work is essentially done. Director isn't
+  //     allowed to abandon a run if ci_gate is green and there's a concrete
+  //     next step (git_push or mark_done) it hasn't tried. Common failure
+  //     mode this catches: Director sees a flaky retry, gets pessimistic,
+  //     and gives up despite the work being one turn from delivery.
+  if (action.action === "give_up") {
+    // Find most recent shell ci_gate result (the canonical CI), and the
+    // most recent git_push gate result (when configured).
+    let lastShellCiGreen: TurnRecord | null = null;
+    let lastGitPushOutcome: TurnRecord | null = null;
+    for (let i = history.length - 1; i >= 0; i--) {
+      const t = history[i]!;
+      if (t.outcome.kind === "ci_gate" && t.outcome.ok === true && (t.outcome.task_type === "shell" || t.outcome.task_type === undefined)) {
+        if (lastShellCiGreen === null) lastShellCiGreen = t;
+      }
+      if (t.outcome.kind === "ci_gate" && t.outcome.task_type === "git_push") {
+        if (lastGitPushOutcome === null) lastGitPushOutcome = t;
+      }
+    }
+    const hasGitPushGate = project.workflow.phases.some(
+      (p) => p.kind === "task" && p.task?.type === "git_push",
     );
-    if (!ciGreen) {
-      return {
-        reason: `mark_done blocked: no successful ci_gate in this run. Run ci_gate (or run_playbook_phase ci_gate) and confirm it passed before marking done.`,
-      };
+    if (lastShellCiGreen) {
+      if (hasGitPushGate) {
+        const gitPushTriedAfterCi =
+          lastGitPushOutcome !== null && lastGitPushOutcome.iteration > lastShellCiGreen.iteration;
+        const lastGitPushOk =
+          lastGitPushOutcome !== null
+          && lastGitPushOutcome.outcome.kind === "ci_gate"
+          && lastGitPushOutcome.outcome.ok === true
+          && lastGitPushOutcome.iteration > lastShellCiGreen.iteration;
+        if (!gitPushTriedAfterCi) {
+          return {
+            reason: `give_up blocked: ci_gate passed (turn ${lastShellCiGreen.iteration}) and git_push hasn't been attempted since. Work is committed in the worktree — run \`run_playbook_phase git_push\` to land it, then mark_done. If git_push then fails persistently, give_up with the SPECIFIC push error.`,
+          };
+        }
+        if (lastGitPushOk && lastGitPushOutcome) {
+          return {
+            reason: `give_up blocked: ci_gate is green AND git_push succeeded (turn ${lastGitPushOutcome.iteration}). The work is on origin. Just mark_done.`,
+          };
+        }
+      } else {
+        return {
+          reason: `give_up blocked: ci_gate passed (turn ${lastShellCiGreen.iteration}) and no git_push gate is configured. Nothing else to verify — mark_done now.`,
+        };
+      }
+    }
+  }
+  // 2) mark_done requires at least one successful ci_gate IF the workflow
+  //    actually has one configured. Projects without a shell-task CI gate
+  //    (e.g. infra-only or experiment workflows) skip this entirely —
+  //    Director can mark_done as soon as the agents are done.
+  if (action.action === "mark_done") {
+    const hasCiGate = project.workflow.phases.some(
+      (p) => p.kind === "task" && p.task?.type === "shell",
+    );
+    if (hasCiGate) {
+      const ciGreen = history.some((t) =>
+        t.outcome.kind === "ci_gate"
+        && t.outcome.ok === true
+        && (t.outcome.task_type === "shell" || t.outcome.task_type === undefined),
+      );
+      if (!ciGreen) {
+        return {
+          reason: `mark_done blocked: no successful ci_gate in this run. Run ci_gate (or run_playbook_phase ci_gate) and confirm it passed before marking done.`,
+        };
+      }
     }
     // 3) If workflow has a git_push gate configured, the LAST git_push
     //    attempt must have succeeded. Push IS done — code that didn't reach
@@ -855,19 +948,31 @@ Read the title + body + episodic memory. Pick ONE bucket:
 - **Pure infra** — Dockerfile / docker-compose / nginx / php.ini / CI / deploy / .env / runtime config; ZERO app source files. → \`run_playbook_phase devops\` then \`run_playbook_phase devops_review\`. Skip the dev coders.
 - **Cross-cutting** — needs BOTH infra changes AND app code. _Don't try to do both in one run._ → \`request_decompose\` immediately. CTO will produce a clean infra subticket + one or more code subtickets.
 
-### Cost and escalation — Junior writes, Senior reviews and fixes
+### Cost and escalation — Junior does 80%, Senior does 20%
 
-The mental model: **Junior is the writer**, **Senior is the supervisor + fixer**. Junior generates the bulk (10× cheaper Haiku). Senior steps in to (a) fix what Junior got wrong and (b) handle the hard cases Junior can't.
+The mental model: **Junior writes AND fixes most things**. Senior steps in only for genuinely hard cases. Target ratio: **80 % of dispatches are Junior, 20 % are Senior**. If a typical ticket burns more on Senior than Junior, you're calling Senior too often — re-read this section.
 
-1. **Always start with Junior** for any code-writing dispatch. This includes boilerplate (controllers, DTOs, services, repositories, tests, migrations, fixtures, type-safe wiring). "Tedious code that just needs to be written correctly" = Junior territory, regardless of total line count.
+1. **Always start with Junior.** Code-writing, boilerplate, controllers, DTOs, services, repos, tests, migrations, fixtures, type wiring. "Tedious but mechanical" = Junior territory.
 
-2. **Senior comes in to fix or supervise** in these specific cases:
-   - **Junior bounced (ok=false)** on this work and you've read the failure notes. Senior gets the next attempt to fix whatever Junior couldn't (the typical case — most Senior dispatches should look like this).
-   - **Reviewer flagged issues** Junior shouldn't be trusted to fix solo (cross-cutting refactor, subtle logic error, security regression). Dispatch Senior with the Reviewer's findings as notes.
-   - **Genuinely hard problem from the start**: subtle concurrency / race condition, algorithm design decision (which data structure / approach), debugging a heisenbug, multi-system coordination. Be honest — if Junior can write it, don't escalate.
-   - **Explicit security-sensitive primitives**: writing auth from scratch, designing a permission model, threat-modeling an API surface. (Note: simple "use existing auth middleware" is Junior — not from-scratch design.)
+2. **Junior also fixes most CI / lint / static-analysis failures.** When ci_gate bounces on:
+   - PHPStan / Psalm / mypy single-line errors (add type hint, remove dead guard, narrow union)
+   - PHP-CS-Fixer / Prettier / ESLint formatting violations
+   - Missing import / use statement
+   - Renaming a method to match a base class
+   - Test setup tweak (one fixture, one mock wiring)
+   → dispatch **Junior again** with the exact failure tail as notes. Haiku is plenty competent at parsing a compiler error and fixing the line. Junior fixing 3 PHPStan errors in 3 attempts costs ~\$1; Senior doing the same costs ~\$5 for no quality gain.
 
-3. **Same-skill cap**: each sub-agent ≤ 4 dispatches per run (code-enforced). After 3 cycles with no progress → \`request_decompose\` or \`give_up\`.
+3. **Senior only for these specific cases** (be honest — most failures don't qualify):
+   - Junior was dispatched **3 times** on the SAME failure and the issue persists. The pattern is structural, not a code typo — Senior brings deeper understanding.
+   - **Reviewer flagged design-level issues**: cross-cutting refactor, leaky abstraction, subtle logic bug Junior wouldn't spot, security regression. Quote Reviewer's specific finding when dispatching.
+   - **Genuinely hard problem from the start**: subtle concurrency / race condition, algorithm design decision (which data structure / approach), debugging a heisenbug, multi-system coordination. State the SPECIFIC hardness in your rationale — "Senior because it's a multi-file change" does NOT qualify.
+   - **Security primitives from scratch**: writing auth from zero, designing a permission model, threat-modeling an API surface. (Using existing auth middleware = Junior.)
+
+4. **After Senior delivers a fix, dispatch Junior to apply remaining polish**, not Senior again. Senior touched the hard part; Junior can run the final ci_gate + fix any leftover lint without another expensive Senior turn.
+
+5. **Same-skill cap**: each sub-agent ≤ 4 dispatches per run (code-enforced). After 3 cycles with no progress → \`request_decompose\` or \`give_up\`.
+
+6. **Reflect every turn.** When you're about to dispatch Senior, ask: "Could Junior fix this with the failure notes as a hint?" If yes, dispatch Junior. Cheap iterations beat expensive one-shots.
 
 ### Closing a run
 
@@ -875,7 +980,7 @@ The mental model: **Junior is the writer**, **Senior is the supervisor + fixer**
 5a. **git_push gate before mark_done — when configured.** If the workflow has a phase with task type \`git_push\`, code enforces that the **last git_push attempt must be ok=true** before \`mark_done\` is accepted. Push IS done — code that didn't reach the remote isn't delivered. Order in a typical run: Junior writes → Reviewer flags issues → Senior fixes → ci_gate green → \`run_playbook_phase git_push\` → mark_done. If git_push fails transiently (auto-retried internally already), Director may re-run it once; persistent failure → give_up with the concrete error.
 6. **Reviewer is REQUIRED before mark_done unless the ticket is trivial.** Before \`mark_done\`, run through this checklist:
    - Did a Reviewer pass on the latest code? If no AND ticket is non-trivial → dispatch Reviewer first.
-   - If Reviewer found issues → dispatch **Senior** to fix them (Junior already had their shot and Reviewer doesn't trust them on these specific issues). Then re-run Reviewer.
+   - If Reviewer found issues, look at the SEVERITY: small/local fixes (rename, missing null check, copy edit, single-test addition) → **Junior** fixes with Reviewer's findings as notes. Only escalate to Senior if Reviewer flagged a **design-level** problem (see rule 3 above).
    - **Mandatory Reviewer triggers (no exceptions):** authentication / authorization, session handling, password / token / secret handling, payments or money movement, permission boundaries, data migration, schema change, deletion of user data, anything touching security headers / CSRF / CORS / SQL queries with user input.
    - **Trivial = Reviewer optional:** typo fix, copy / string change, single-line config tweak, dependency bump with no API change, rename within one file. When in doubt, run Reviewer — one extra turn is cheaper than a regression.
 7. **Tester** runs automated tests separately from ci_gate; use it when ci_gate doesn't already exercise the test suite.
@@ -1022,7 +1127,12 @@ function formatOutcome(o: Outcome): string {
   if (o.kind === "ci_gate") {
     const label = o.task_type && o.task_type !== "shell" ? `${o.task_type} gate` : "ci_gate";
     const phase = o.phase_id ? ` [${o.phase_id}]` : "";
-    return `${label}${phase} ok=${o.ok}\n  summary: ${o.summary.slice(0, 200)}${o.details_tail ? `\n  tail: ${o.details_tail.slice(0, 300)}` : ""}`;
+    // Show the LAST 2500 chars of the tail, not the first 300. CI output is
+    // typically structured "noise (context, file scan) → ERROR SUMMARY at the
+    // bottom"; truncating from the front cut off the actual error and left
+    // Director staring at git diff noise (real bug from AGA-60 run ZEClJTg2ME).
+    const tail = o.details_tail ? `\n  tail:\n${o.details_tail.slice(-2500)}` : "";
+    return `${label}${phase} ok=${o.ok}\n  summary: ${o.summary.slice(0, 400)}${tail}`;
   }
   if (o.kind === "context_fetched") {
     if (!o.ok) return `fetch_context ${o.connector} FAILED: ${o.error ?? "(unknown)"}`;
@@ -1046,12 +1156,33 @@ function formatOutcome(o: Outcome): string {
 // ---- Sub-agent dispatch -----------------------------------------------------
 
 function resolveAvailableSubagents(project: ProjectWithRepos, cfg: DirectorConfig): string[] {
+  // Explicit override always wins.
   if (cfg.available_subagents && cfg.available_subagents.length > 0) {
     return cfg.available_subagents.filter((n) => project.agents.some((a) => a.name === n));
   }
-  return project.agents
-    .filter((a) => !SUBAGENT_BLACKLIST.has(a.name))
+  // Otherwise the workflow IS the contract: only agents referenced by a phase
+  // (kind=agent, agent_id set) are dispatchable. Agents that exist in
+  // project.agents but aren't wired into the workflow are intentional
+  // off-the-shelf templates or internal-only roles (CTO via decompose,
+  // Memory Curator via post-run hook) — Director should NOT surface them
+  // as dispatch targets.
+  const wiredAgentIds = new Set(
+    (project.workflow.phases ?? [])
+      .filter((p) => p.kind === "agent" && p.agent_id)
+      .map((p) => p.agent_id as string),
+  );
+  const wired = project.agents
+    .filter((a) => wiredAgentIds.has(a.id) && !SUBAGENT_BLACKLIST.has(a.name))
     .map((a) => a.name);
+  // Safety fallback: if workflow has no agent phases yet (fresh project),
+  // fall back to all non-blacklisted agents so the system isn't unusable
+  // until the user wires up a workflow.
+  if (wired.length === 0) {
+    return project.agents
+      .filter((a) => !SUBAGENT_BLACKLIST.has(a.name))
+      .map((a) => a.name);
+  }
+  return wired;
 }
 
 async function dispatchSubagent(
@@ -1369,7 +1500,7 @@ async function runTaskGate(
   };
   const verdict = await runTask(taskType, taskConfig, taskCtx);
   const summary = String(verdict.summary ?? "").slice(0, 400);
-  const tail = String((verdict as { details?: string }).details ?? "").slice(-2000);
+  const tail = String((verdict as { details?: string }).details ?? "").slice(-4000);
   args.emit("director_subagent_done", {
     subagent: `task:${phaseId}`,
     task_type: taskType,
@@ -1423,7 +1554,7 @@ async function runCiGate(args: DirectorRunArgs, cfg: DirectorConfig): Promise<Ci
   };
 
   const verdict = await runTask("shell", { command, timeout_sec: timeoutSec }, taskCtx);
-  const tail = String((verdict as { details?: string }).details ?? "").slice(-2000);
+  const tail = String((verdict as { details?: string }).details ?? "").slice(-4000);
 
   args.emit("director_subagent_done", {
     subagent: "ci_gate",

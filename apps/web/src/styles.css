@@ -768,11 +768,74 @@ textarea { resize: vertical; min-height: 80px; }
   padding: 14px 16px;
   font-size: 14px;
   line-height: 1.55;
-  white-space: pre-wrap;
   cursor: text;
   transition: border-color 0.1s;
 }
+.tm-prose:not(.md-body) { white-space: pre-wrap; }
 .tm-prose:hover { border-color: var(--border-strong); }
+
+/* Markdown rendering — applied to .md-body wrappers in the ticket modal
+   (description, triage notes). Tight, readable, no exotic typography. */
+.md-body p { margin: 0 0 0.6em; }
+.md-body p:last-child { margin-bottom: 0; }
+.md-body .md-h1, .md-body .md-h2, .md-body .md-h3,
+.md-body .md-h4, .md-body .md-h5, .md-body .md-h6 {
+  margin: 0.8em 0 0.4em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.md-body .md-h1:first-child, .md-body .md-h2:first-child,
+.md-body .md-h3:first-child { margin-top: 0; }
+.md-body .md-h1 { font-size: 1.3em; }
+.md-body .md-h2 { font-size: 1.15em; }
+.md-body .md-h3 { font-size: 1.05em; }
+.md-body .md-h4, .md-body .md-h5, .md-body .md-h6 { font-size: 1em; }
+.md-body .md-list {
+  margin: 0.3em 0 0.6em 1.2em;
+  padding-left: 0;
+}
+.md-body .md-list li { margin: 0.2em 0; }
+.md-body .md-inline {
+  background: var(--gray-soft);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.9em;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}
+.md-body .md-pre {
+  background: var(--gray-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow: auto;
+  margin: 0.5em 0;
+}
+.md-body .md-pre .md-code {
+  background: transparent;
+  padding: 0;
+  font-size: 0.9em;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  white-space: pre;
+}
+.md-body .md-link {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--accent);
+}
+.md-body .md-link:hover { border-bottom-style: solid; }
+.md-body .md-hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1em 0;
+}
+.md-body .md-quote {
+  border-left: 3px solid var(--border);
+  padding-left: 10px;
+  margin: 0.5em 0;
+  color: var(--text-dim);
+}
+.md-body strong { font-weight: 600; }
+.md-body em { font-style: italic; }
 
 .tm-callout {
   background: var(--yellow-soft);
