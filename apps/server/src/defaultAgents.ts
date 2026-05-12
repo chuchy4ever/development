@@ -531,7 +531,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     system_prompt: JUNIOR_CODER,
     model: "claude-haiku-4-5-20251001",
     allowed_tools: null,
-    core: true,
+    core: false,
   },
   {
     key: "senior_coder",
@@ -542,7 +542,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     system_prompt: SENIOR_CODER,
     model: "claude-opus-4-7",
     allowed_tools: null,
-    core: true,
+    core: false,
   },
   {
     key: "reviewer",
@@ -586,7 +586,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     system_prompt: PHP_JUNIOR,
     model: "claude-haiku-4-5-20251001",
     allowed_tools: null,
-    core: false,
+    core: true,
   },
   {
     key: "php_senior",
@@ -597,7 +597,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     system_prompt: PHP_SENIOR,
     model: "claude-opus-4-7",
     allowed_tools: null,
-    core: false,
+    core: true,
   },
   {
     key: "cto",
