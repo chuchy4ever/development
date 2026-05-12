@@ -42,6 +42,29 @@ export const SECRET_SPECS: SecretSpec[] = [
     envFallback: "SSH_DEFAULT_TARGET",
     hint: 'Default target. Format: user@host or user@host:port (e.g. "deploy@1.2.3.4:25"). Phase host field overrides this when set.',
   },
+  // Telegram (global-only in practice — bot is per ceo instance, not per project;
+  // but kept in SECRET_SPECS so the same admin UI form handles it).
+  {
+    key: "telegram_bot_token",
+    label: "Telegram bot token",
+    secret: true,
+    envFallback: "TELEGRAM_BOT_TOKEN",
+    hint: 'Get from @BotFather. Format: "1234567890:AAH...". Long-polling bot starts only when set (requires server restart to (re)connect).',
+  },
+  {
+    key: "telegram_output_chat_id",
+    label: "Telegram output chat id",
+    secret: false,
+    envFallback: "TELEGRAM_OUTPUT_CHAT_ID",
+    hint: 'Numeric chat id where run-end notifications + digests are pushed. Use /chatid in the bot conversation to discover it.',
+  },
+  {
+    key: "telegram_allowed_user_ids",
+    label: "Telegram allowed user ids",
+    secret: false,
+    envFallback: "TELEGRAM_ALLOWED_USER_IDS",
+    hint: "Comma-separated Telegram user ids that are allowed to talk to the bot. Empty = bot rejects every message.",
+  },
 ];
 
 /** Lookup a single secret. Resolution order:

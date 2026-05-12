@@ -427,6 +427,7 @@ export const api = {
     bot_token_set: boolean;
     output_chat_id_set: boolean;
     allowed_users_count: number;
+    bot_running: boolean;
   }>(`/api/health/telegram`),
   unreadJobRunsCount: (since: string, projectId?: string | null) => {
     const q = new URLSearchParams({ since });

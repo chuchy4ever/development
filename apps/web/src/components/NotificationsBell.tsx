@@ -32,7 +32,15 @@ function projectHasTelegramTask(p: ProjectWithRepos | null): boolean {
   return phases.some((ph: any) => ph.kind === "task" && ph.task?.type === "telegram");
 }
 
-type TelegramHealth = { bot_token_set: boolean; output_chat_id_set: boolean; allowed_users_count: number };
+type TelegramHealth = {
+  bot_token_set: boolean;
+  output_chat_id_set: boolean;
+  allowed_users_count: number;
+  /** True only when the long-poll bot booted at server startup with a token.
+   *  A DB-set token works for outbound sends immediately, but the inbound
+   *  long-poll bot needs a server restart to (re)connect. */
+  bot_running: boolean;
+};
 
 export function NotificationsBell({ projects, activeProject }: {
   projects: Project[];
@@ -103,12 +111,14 @@ export function NotificationsBell({ projects, activeProject }: {
   }
 
   // Tooltip text for the Telegram status chip — explains exactly what's
-  // missing so the user knows what to fix in .env / workflow.
+  // missing so the user knows where to fix it (Admin → Secrets, or .env).
   const tgTooltip = !tgBotOk
-    ? "Telegram bot není připojený — chybí TELEGRAM_BOT_TOKEN v .env. Bot ani digesty ani notifikace z jobů přes Telegram poslat nedokáže."
+    ? "Telegram bot token chybí. Nastav v Admin → Secrets (klíč telegram_bot_token) nebo přes env TELEGRAM_BOT_TOKEN. Bez tokenu se odchozí zprávy ani inbound bot nespustí."
     : !tgFullyConfigured
-    ? `Telegram bot běží, ale konfigurace je neúplná: ${(!tg?.output_chat_id_set ? "TELEGRAM_OUTPUT_CHAT_ID nenastaven" : "")}${(!tg?.output_chat_id_set && (tg?.allowed_users_count ?? 0) === 0 ? "; " : "")}${((tg?.allowed_users_count ?? 0) === 0 ? "TELEGRAM_ALLOWED_USER_IDS prázdné (bot odmítne každou zprávu)" : "")}.`
-    : "Telegram bot je připojený a má všechnu konfiguraci (token, output chat, allowed users).";
+    ? `Token nastaven, ale konfigurace neúplná: ${(!tg?.output_chat_id_set ? "telegram_output_chat_id chybí" : "")}${(!tg?.output_chat_id_set && (tg?.allowed_users_count ?? 0) === 0 ? "; " : "")}${((tg?.allowed_users_count ?? 0) === 0 ? "telegram_allowed_user_ids prázdné (inbound bot odmítne každou zprávu)" : "")}. Doplň v Admin → Secrets.`
+    : tg?.bot_running
+    ? "Telegram bot je plně nakonfigurovaný a inbound long-poll běží."
+    : "Outbound Telegram zprávy fungují (token + chat + users nastaveny), ale inbound long-poll bot nečte zprávy — vyžaduje restart serveru, aby se na nový token připojil.";
 
   const projTgTooltip = !activeProject
     ? "Vyber projekt pro zobrazení stavu Telegram komunikace v tomto projektu."

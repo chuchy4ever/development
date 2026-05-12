@@ -2,20 +2,26 @@
  * Outbound Telegram messaging — extracted so non-bot modules (scheduled jobs,
  * digests, alerts) can post without pulling in the long-poll bot's wiring.
  *
- * If TELEGRAM_BOT_TOKEN is unset, send is a no-op that returns false. Callers
- * don't need to special-case the disabled state.
+ * Resolves the bot token live from global_secrets (admin UI) → env fallback,
+ * so adding the token via UI takes effect on the next send without a restart.
+ * The long-polling bot itself still needs a restart to (re)connect.
  */
 
-import { TELEGRAM_BOT_TOKEN } from "./config.js";
+import { getGlobalSecret } from "./globalSecrets.js";
 
-const API_BASE = () => `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
+function botToken(): string {
+  return getGlobalSecret("telegram_bot_token");
+}
+
+const API_BASE = (token: string) => `https://api.telegram.org/bot${token}`;
 
 interface TgResult { ok: boolean; description?: string }
 
 /** POST to the Telegram bot API. Throws on transport / API failure. */
 export async function tg<T = unknown>(method: string, body?: Record<string, unknown>): Promise<T> {
-  if (!TELEGRAM_BOT_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN not set");
-  const res = await fetch(`${API_BASE()}/${method}`, {
+  const token = botToken();
+  if (!token) throw new Error("telegram_bot_token not set (admin → secrets, or TELEGRAM_BOT_TOKEN env)");
+  const res = await fetch(`${API_BASE(token)}/${method}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
@@ -37,7 +43,7 @@ export async function sendTelegramMessage(
   text: string,
   opts: { replyTo?: number } = {},
 ): Promise<boolean> {
-  if (!TELEGRAM_BOT_TOKEN) return false;
+  if (!botToken()) return false;
   try {
     await tg("sendMessage", {
       chat_id: chatId,

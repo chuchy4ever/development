@@ -15,7 +15,8 @@ import { cleanupOldRunArtifacts, resumeOrphanedRuns } from "./runs.js";
 import { startTelegramBot } from "./telegramBot.js";
 import { jobsRouter, jobRunsRouter } from "./routes/jobs.js";
 import { startScheduledJobs, pruneOldJobRuns } from "./scheduledJobs.js";
-import { TELEGRAM_BOT_TOKEN, TELEGRAM_OUTPUT_CHAT_ID, TELEGRAM_ALLOWED_USER_IDS } from "./config.js";
+import { getGlobalSecret } from "./globalSecrets.js";
+import { TELEGRAM_BOT_TOKEN } from "./config.js";
 
 const app = express();
 app.use(cors());
@@ -27,11 +28,21 @@ app.get("/api/health", (_req, res) => {
 
 // Telegram connectivity status — surfaced in the UI next to the NotificationsBell
 // so the user can tell at a glance whether the bot will actually deliver.
+// Reads through getGlobalSecret so DB-set values reflect immediately (no
+// restart needed for the chip to flip green); long-poll bot connection itself
+// still needs a restart to pick up a new token.
 app.get("/api/health/telegram", (_req, res) => {
+  const botToken = getGlobalSecret("telegram_bot_token");
+  const outputChat = getGlobalSecret("telegram_output_chat_id");
+  const allowedRaw = getGlobalSecret("telegram_allowed_user_ids");
+  const allowedCount = allowedRaw.split(",").map((s) => s.trim()).filter(Boolean).length;
   res.json({
-    bot_token_set: TELEGRAM_BOT_TOKEN.length > 0,
-    output_chat_id_set: TELEGRAM_OUTPUT_CHAT_ID.length > 0,
-    allowed_users_count: TELEGRAM_ALLOWED_USER_IDS.length,
+    bot_token_set: botToken.length > 0,
+    output_chat_id_set: outputChat.length > 0,
+    allowed_users_count: allowedCount,
+    // True only when the long-poll bot booted with a token at server startup.
+    // DB-set token won't activate the bot until restart.
+    bot_running: TELEGRAM_BOT_TOKEN.length > 0,
   });
 });
 
