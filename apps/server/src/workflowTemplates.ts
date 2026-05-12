@@ -53,7 +53,7 @@ function phpTeamTemplate(): WorkflowPreset {
     key: "php-team",
     name: "PHP team",
     description:
-      "Architect produces a plan when design is needed; Junior writes the bulk; Senior is the escalation. Reviewer/Closer retry to Senior on issues. Director routes the ticket on its first turn — no Tech Lead step.",
+      "Architect produces a plan when design is needed; Junior writes the bulk; Senior is the escalation. Reviewer retries to Senior on issues. Director routes the ticket on its first turn — no Tech Lead step.",
     source: "builtin",
     agents: [
       {
@@ -96,14 +96,9 @@ function phpTeamTemplate(): WorkflowPreset {
         model: null,
         allowed_tools: null,
       },
-      {
-        name: "Closer",
-        role: "reviewer",
-        category: "Strategy",
-        system_prompt: promptByKey("closer"),
-        model: "claude-sonnet-4-6",
-        allowed_tools: ["Read", "Grep", "Glob", "Bash"],
-      },
+      // Closer template removed — Director enforces ci_gate via code-level
+      // guardrail and mark_done covers the close-out semantics. Keeping it
+      // would add an obsolete agent + a now-orphaned promptByKey lookup.
     ],
     phases: [
       { id: "architect", agent_name: "Architect", next: "php_junior", position: { x: 240, y: 80 } },
@@ -127,8 +122,7 @@ function phpTeamTemplate(): WorkflowPreset {
         max_attempts: 2,
         position: { x: 960, y: 240 },
       },
-      { id: "tester", agent_name: "Tester", next: "closer", retry_target: "php_senior", max_attempts: 2, position: { x: 1140, y: 240 } },
-      { id: "closer", agent_name: "Closer", next: null, retry_target: "php_senior", max_attempts: 2, position: { x: 1320, y: 240 } },
+      { id: "tester", agent_name: "Tester", next: null, retry_target: "php_senior", max_attempts: 2, position: { x: 1140, y: 240 } },
     ],
     project_specifics:
       "PHP project. Follow PSR-12, declare(strict_types=1) at the top of every PHP file, type-hint all parameters and returns. Use the project's framework conventions (composer.json reveals which one). Tests live next to the code under test (PHPUnit or Pest).",
@@ -175,21 +169,13 @@ function genericTeamTemplate(): WorkflowPreset {
         model: null,
         allowed_tools: null,
       },
-      {
-        name: "Closer",
-        role: "reviewer",
-        category: "Strategy",
-        system_prompt: promptByKey("closer"),
-        model: "claude-sonnet-4-6",
-        allowed_tools: ["Read", "Grep", "Glob", "Bash"],
-      },
+      // Closer agent removed (see comment in phpTeamTemplate).
     ],
     phases: [
       { id: "junior", agent_name: "Junior Coder", next: "senior", position: { x: 240, y: 240 } },
       { id: "senior", agent_name: "Senior Coder", next: "reviewer", position: { x: 420, y: 240 } },
       { id: "reviewer", agent_name: "Reviewer", next: "tester", retry_target: "senior", max_attempts: 2, position: { x: 600, y: 240 } },
-      { id: "tester", agent_name: "Tester", next: "closer", retry_target: "senior", max_attempts: 2, position: { x: 780, y: 240 } },
-      { id: "closer", agent_name: "Closer", next: null, retry_target: "senior", max_attempts: 2, position: { x: 960, y: 240 } },
+      { id: "tester", agent_name: "Tester", next: null, retry_target: "senior", max_attempts: 2, position: { x: 780, y: 240 } },
     ],
   };
 }
