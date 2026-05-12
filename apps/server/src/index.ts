@@ -15,6 +15,7 @@ import { cleanupOldRunArtifacts, resumeOrphanedRuns } from "./runs.js";
 import { startTelegramBot } from "./telegramBot.js";
 import { jobsRouter, jobRunsRouter } from "./routes/jobs.js";
 import { startScheduledJobs, pruneOldJobRuns } from "./scheduledJobs.js";
+import { TELEGRAM_BOT_TOKEN, TELEGRAM_OUTPUT_CHAT_ID, TELEGRAM_ALLOWED_USER_IDS } from "./config.js";
 
 const app = express();
 app.use(cors());
@@ -22,6 +23,16 @@ app.use(express.json({ limit: "2mb" }));
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, ts: new Date().toISOString() });
+});
+
+// Telegram connectivity status — surfaced in the UI next to the NotificationsBell
+// so the user can tell at a glance whether the bot will actually deliver.
+app.get("/api/health/telegram", (_req, res) => {
+  res.json({
+    bot_token_set: TELEGRAM_BOT_TOKEN.length > 0,
+    output_chat_id_set: TELEGRAM_OUTPUT_CHAT_ID.length > 0,
+    allowed_users_count: TELEGRAM_ALLOWED_USER_IDS.length,
+  });
 });
 
 app.use("/api/projects", projectsRouter);

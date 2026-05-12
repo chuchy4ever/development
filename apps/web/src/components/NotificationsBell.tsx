@@ -8,7 +8,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import type { JobRun, Project } from "@ceo/shared";
+import type { JobRun, Project, ProjectWithRepos } from "@ceo/shared";
 import { api } from "../api";
 
 const LAST_SEEN_KEY = "ceo.notifications.lastSeenAt";
@@ -23,12 +23,41 @@ function saveLastSeen(iso: string) {
   localStorage.setItem(LAST_SEEN_KEY, iso);
 }
 
-export function NotificationsBell({ projects }: { projects: Project[] }) {
+/** Project has Telegram comms wired = at least one workflow phase is a
+ *  telegram-task connector (notifications on run-end fan-out). Pure derivation
+ *  from workflow JSON — no extra API needed. */
+function projectHasTelegramTask(p: ProjectWithRepos | null): boolean {
+  if (!p) return false;
+  const phases = p.workflow?.phases ?? [];
+  return phases.some((ph: any) => ph.kind === "task" && ph.task?.type === "telegram");
+}
+
+type TelegramHealth = { bot_token_set: boolean; output_chat_id_set: boolean; allowed_users_count: number };
+
+export function NotificationsBell({ projects, activeProject }: {
+  projects: Project[];
+  activeProject?: ProjectWithRepos | null;
+}) {
   const [unread, setUnread] = useState(0);
   const [items, setItems] = useState<JobRun[]>([]);
   const [open, setOpen] = useState(false);
+  const [tg, setTg] = useState<TelegramHealth | null>(null);
   const lastSeenRef = useRef(loadLastSeen());
   const popoverRef = useRef<HTMLDivElement | null>(null);
+
+  // Telegram health — fetched once on mount, refreshed when the dropdown
+  // opens (cheap GET with no DB hit on the server).
+  useEffect(() => {
+    api.telegramHealth().then(setTg).catch(() => setTg(null));
+  }, []);
+  useEffect(() => {
+    if (!open) return;
+    api.telegramHealth().then(setTg).catch(() => {});
+  }, [open]);
+
+  const tgBotOk = tg?.bot_token_set ?? false;
+  const tgFullyConfigured = tgBotOk && (tg?.output_chat_id_set ?? false) && (tg?.allowed_users_count ?? 0) > 0;
+  const projTgEnabled = projectHasTelegramTask(activeProject ?? null);
 
   // Poll unread count.
   useEffect(() => {
@@ -73,8 +102,64 @@ export function NotificationsBell({ projects }: { projects: Project[] }) {
     setUnread(0);
   }
 
+  // Tooltip text for the Telegram status chip — explains exactly what's
+  // missing so the user knows what to fix in .env / workflow.
+  const tgTooltip = !tgBotOk
+    ? "Telegram bot není připojený — chybí TELEGRAM_BOT_TOKEN v .env. Bot ani digesty ani notifikace z jobů přes Telegram poslat nedokáže."
+    : !tgFullyConfigured
+    ? `Telegram bot běží, ale konfigurace je neúplná: ${(!tg?.output_chat_id_set ? "TELEGRAM_OUTPUT_CHAT_ID nenastaven" : "")}${(!tg?.output_chat_id_set && (tg?.allowed_users_count ?? 0) === 0 ? "; " : "")}${((tg?.allowed_users_count ?? 0) === 0 ? "TELEGRAM_ALLOWED_USER_IDS prázdné (bot odmítne každou zprávu)" : "")}.`
+    : "Telegram bot je připojený a má všechnu konfiguraci (token, output chat, allowed users).";
+
+  const projTgTooltip = !activeProject
+    ? "Vyber projekt pro zobrazení stavu Telegram komunikace v tomto projektu."
+    : projTgEnabled
+    ? `Projekt má wired Telegram task ve workflow → zprávy se odešlou${tgBotOk ? "" : " (ALE bot není připojený — viz Telegram chip vlevo)"}.`
+    : "Projekt nemá žádný Telegram task ve workflow → notifikace o run-end se přes Telegram NEPOSÍLAJÍ. Přidej do workflow Telegram connector v editoru.";
+
+  const chipStyle: React.CSSProperties = {
+    padding: "4px 9px",
+    borderRadius: 14,
+    border: "1px solid var(--border)",
+    background: "var(--bg-elevated, var(--bg))",
+    fontSize: 11,
+    fontWeight: 600,
+    cursor: "help",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+    userSelect: "none",
+  };
+
   return (
-    <div ref={popoverRef} style={{ position: "fixed", top: 12, right: 16, zIndex: 1000 }}>
+    <div ref={popoverRef} style={{ position: "fixed", top: 12, right: 16, zIndex: 1000, display: "flex", alignItems: "center", gap: 6 }}>
+      {/* Global Telegram bot connectivity */}
+      <span
+        title={tgTooltip}
+        style={{
+          ...chipStyle,
+          color: tgFullyConfigured ? "var(--green, #10a050)" : tgBotOk ? "#b88800" : "var(--text-dim)",
+          borderColor: tgFullyConfigured ? "var(--green, #10a050)" : tgBotOk ? "#b88800" : "var(--border)",
+        }}
+      >
+        <span>✈</span>
+        <span>{tgFullyConfigured ? "TG ✓" : tgBotOk ? "TG ⚠" : "TG ✗"}</span>
+      </span>
+
+      {/* Per-project Telegram comms (only shown when a project is active) */}
+      {activeProject && (
+        <span
+          title={projTgTooltip}
+          style={{
+            ...chipStyle,
+            color: projTgEnabled ? "var(--green, #10a050)" : "var(--text-dim)",
+            borderColor: projTgEnabled ? "var(--green, #10a050)" : "var(--border)",
+          }}
+        >
+          <span>📣</span>
+          <span>{projTgEnabled ? "proj ✓" : "proj ✗"}</span>
+        </span>
+      )}
+
       <button
         onClick={() => setOpen((o) => !o)}
         style={{

@@ -43,7 +43,7 @@ export function App() {
 
   return (
     <div className="app">
-      <NotificationsBell projects={projects} />
+      <NotificationsBell projects={projects} activeProject={activeProject} />
       <Sidebar
         projects={projects}
         activeId={route.projectId}

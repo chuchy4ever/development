@@ -423,6 +423,11 @@ export const api = {
     return req<JobRun[]>(`/api/job-runs${qs ? `?${qs}` : ""}`);
   },
   getJobRun: (id: number) => req<JobRun>(`/api/job-runs/${id}`),
+  telegramHealth: () => req<{
+    bot_token_set: boolean;
+    output_chat_id_set: boolean;
+    allowed_users_count: number;
+  }>(`/api/health/telegram`),
   unreadJobRunsCount: (since: string, projectId?: string | null) => {
     const q = new URLSearchParams({ since });
     if (projectId === null) q.set("project_id", "null");
