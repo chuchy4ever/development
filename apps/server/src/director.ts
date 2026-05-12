@@ -557,7 +557,7 @@ function enforceGuardrails(
   //     trivial-looking PHPStan / lint errors that prove to be deeper than
   //     they look. This hard cap breaks the loop without waiting for the
   //     4× total cap. Identifies Junior by role=coder + name containing
-  //     "Junior" (works for both "PHP Junior Coder" and bare "Junior Coder").
+  //     "Junior" (matches "PHP Junior Coder" and any future "*Junior*" coder).
   if (targetName) {
     const targetAgent = project.agents.find((a) => a.name === targetName);
     if (targetAgent?.role === "coder" && /junior/i.test(targetName)) {

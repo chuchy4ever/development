@@ -308,7 +308,7 @@ export function AgentForm({ mode, initial, projectId, onClose, onSubmit }: FormP
           <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 8 }}>
             <div className="form-row">
               <label>Name</label>
-              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Senior Coder" />
+              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. PHP Senior Coder" />
             </div>
             <div className="form-row">
               <label>Role</label>

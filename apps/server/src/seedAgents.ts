@@ -110,7 +110,7 @@ export function addAgentFromTemplate(projectId: string, key: string): string | n
 
 /**
  * Build a default workflow that puts the Junior/Senior pattern into use:
- *   Junior Coder → Senior Coder (retry → Junior) → Reviewer (retry → Junior) → Tester
+ *   PHP Junior Coder → PHP Senior Coder → Reviewer (retry → Senior) → Tester
  * Falls back gracefully when one of the agents isn't present.
  */
 export function defaultWorkflowForProject(projectId: string): WorkflowDefinition {
@@ -122,8 +122,8 @@ export function defaultWorkflowForProject(projectId: string): WorkflowDefinition
   for (const r of rows) {
     if (!firstByRole.has(r.role)) firstByRole.set(r.role, r.id);
   }
-  const junior = byName.get("Junior Coder") ?? byName.get("Coder") ?? firstByRole.get("coder");
-  const senior = byName.get("Senior Coder");
+  const junior = byName.get("PHP Junior Coder") ?? byName.get("Drupal Junior Coder") ?? byName.get("Coder") ?? firstByRole.get("coder");
+  const senior = byName.get("PHP Senior Coder") ?? byName.get("Drupal Senior Coder");
   const reviewer = byName.get("Reviewer") ?? firstByRole.get("reviewer");
   const tester = byName.get("Tester") ?? firstByRole.get("tester");
   const closer = byName.get("Closer");

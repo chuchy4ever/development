@@ -53,7 +53,7 @@ function phpTeamTemplate(): WorkflowPreset {
     key: "php-team",
     name: "PHP team",
     description:
-      "Architect produces a plan when design is needed; Junior writes the bulk; Senior is the escalation. Reviewer/Closer retry to Senior on issues. Director routes the ticket on its first turn — no Tech Lead step.",
+      "Architect produces a plan when design is needed; Junior writes the bulk; Senior is the escalation. Reviewer retries to Senior on issues. Director routes the ticket on its first turn — no Tech Lead step.",
     source: "builtin",
     agents: [
       {
@@ -96,14 +96,9 @@ function phpTeamTemplate(): WorkflowPreset {
         model: null,
         allowed_tools: null,
       },
-      {
-        name: "Closer",
-        role: "reviewer",
-        category: "Strategy",
-        system_prompt: promptByKey("closer"),
-        model: "claude-sonnet-4-6",
-        allowed_tools: ["Read", "Grep", "Glob", "Bash"],
-      },
+      // Closer template removed — Director enforces ci_gate via code-level
+      // guardrail and mark_done covers the close-out semantics. Keeping it
+      // would add an obsolete agent + a now-orphaned promptByKey lookup.
     ],
     phases: [
       { id: "architect", agent_name: "Architect", next: "php_junior", position: { x: 240, y: 80 } },
@@ -127,35 +122,34 @@ function phpTeamTemplate(): WorkflowPreset {
         max_attempts: 2,
         position: { x: 960, y: 240 },
       },
-      { id: "tester", agent_name: "Tester", next: "closer", retry_target: "php_senior", max_attempts: 2, position: { x: 1140, y: 240 } },
-      { id: "closer", agent_name: "Closer", next: null, retry_target: "php_senior", max_attempts: 2, position: { x: 1320, y: 240 } },
+      { id: "tester", agent_name: "Tester", next: null, retry_target: "php_senior", max_attempts: 2, position: { x: 1140, y: 240 } },
     ],
     project_specifics:
       "PHP project. Follow PSR-12, declare(strict_types=1) at the top of every PHP file, type-hint all parameters and returns. Use the project's framework conventions (composer.json reveals which one). Tests live next to the code under test (PHPUnit or Pest).",
   };
 }
 
-function genericTeamTemplate(): WorkflowPreset {
+function drupalTeamTemplate(): WorkflowPreset {
   return {
-    key: "generic-team",
-    name: "Generic team (any language)",
+    key: "drupal-team",
+    name: "Drupal team",
     description:
-      "Same shape as PHP team but with language-agnostic Junior/Senior. Use for non-PHP projects.",
+      "Junior writes the bulk; Senior is the escalation, fixes cacheability / config schema / security gaps. Reviewer retries to Senior on issues.",
     source: "builtin",
     agents: [
       {
-        name: "Junior Coder",
+        name: "Drupal Junior Coder",
         role: "coder",
         category: "Development",
-        system_prompt: promptByKey("junior_coder"),
+        system_prompt: promptByKey("drupal_junior"),
         model: "claude-haiku-4-5-20251001",
         allowed_tools: null,
       },
       {
-        name: "Senior Coder",
+        name: "Drupal Senior Coder",
         role: "coder",
         category: "Development",
-        system_prompt: promptByKey("senior_coder"),
+        system_prompt: promptByKey("drupal_senior"),
         model: "claude-opus-4-7",
         allowed_tools: null,
       },
@@ -175,22 +169,30 @@ function genericTeamTemplate(): WorkflowPreset {
         model: null,
         allowed_tools: null,
       },
-      {
-        name: "Closer",
-        role: "reviewer",
-        category: "Strategy",
-        system_prompt: promptByKey("closer"),
-        model: "claude-sonnet-4-6",
-        allowed_tools: ["Read", "Grep", "Glob", "Bash"],
-      },
     ],
     phases: [
-      { id: "junior", agent_name: "Junior Coder", next: "senior", position: { x: 240, y: 240 } },
-      { id: "senior", agent_name: "Senior Coder", next: "reviewer", position: { x: 420, y: 240 } },
-      { id: "reviewer", agent_name: "Reviewer", next: "tester", retry_target: "senior", max_attempts: 2, position: { x: 600, y: 240 } },
-      { id: "tester", agent_name: "Tester", next: "closer", retry_target: "senior", max_attempts: 2, position: { x: 780, y: 240 } },
-      { id: "closer", agent_name: "Closer", next: null, retry_target: "senior", max_attempts: 2, position: { x: 960, y: 240 } },
+      { id: "drupal_junior", agent_name: "Drupal Junior Coder", next: "drupal_senior", position: { x: 240, y: 240 } },
+      { id: "drupal_senior", agent_name: "Drupal Senior Coder", next: "reviewer", position: { x: 420, y: 240 } },
+      { id: "reviewer", agent_name: "Reviewer", next: "ci_gate", retry_target: "drupal_senior", max_attempts: 2, position: { x: 600, y: 240 } },
+      {
+        id: "ci_gate",
+        kind: "task",
+        task: {
+          type: "shell",
+          config: {
+            command: "if [ -f Makefile ] && grep -qE '^ci:' Makefile; then make ci; elif [ -f composer.json ]; then composer install --no-interaction --prefer-dist && (vendor/bin/phpunit || composer test) && (vendor/bin/phpcs --standard=Drupal,DrupalPractice web/modules/custom || true); else echo 'no CI configured'; fi",
+            timeout_sec: 900,
+          },
+        },
+        next: "tester",
+        retry_target: "drupal_senior",
+        max_attempts: 2,
+        position: { x: 780, y: 240 },
+      },
+      { id: "tester", agent_name: "Tester", next: null, retry_target: "drupal_senior", max_attempts: 2, position: { x: 960, y: 240 } },
     ],
+    project_specifics:
+      "Drupal project. Custom code in web/modules/custom/. PSR-12 + Drupal coding standards. declare(strict_types=1) at the top of every PHP file. Services with DI rather than \\Drupal::service() in hooks. Configuration management via drush cex; never edit core or contrib (patches go in composer.json).",
   };
 }
 
@@ -198,14 +200,14 @@ function soloDevTemplate(): WorkflowPreset {
   return {
     key: "solo-dev",
     name: "Solo dev (minimal)",
-    description: "Single Coder + Tester. For small tickets where retry/review overhead doesn't pay off.",
+    description: "Single PHP Coder + Tester. For small tickets where retry/review overhead doesn't pay off.",
     source: "builtin",
     agents: [
       {
         name: "Coder",
         role: "coder",
         category: "Development",
-        system_prompt: promptByKey("junior_coder"),
+        system_prompt: promptByKey("php_junior"),
         model: "claude-sonnet-4-6",
         allowed_tools: null,
       },
@@ -227,7 +229,7 @@ function soloDevTemplate(): WorkflowPreset {
 
 const BUILTIN: () => WorkflowPreset[] = () => [
   phpTeamTemplate(),
-  genericTeamTemplate(),
+  drupalTeamTemplate(),
   soloDevTemplate(),
 ];
 
