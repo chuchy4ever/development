@@ -129,28 +129,20 @@ function phpTeamTemplate(): WorkflowPreset {
   };
 }
 
-function genericTeamTemplate(): WorkflowPreset {
+function drupalTeamTemplate(): WorkflowPreset {
   return {
-    key: "generic-team",
-    name: "Generic team (any language)",
+    key: "drupal-team",
+    name: "Drupal team",
     description:
-      "Same shape as PHP team but with language-agnostic Junior/Senior. Use for non-PHP projects.",
+      "Single Drupal Coder owns the diff end-to-end (no Junior/Senior split — Drupal work is too framework-specific to bisect). Reviewer + Tester after, with CI gate.",
     source: "builtin",
     agents: [
       {
-        name: "Junior Coder",
+        name: "Drupal Coder",
         role: "coder",
         category: "Development",
-        system_prompt: promptByKey("junior_coder"),
-        model: "claude-haiku-4-5-20251001",
-        allowed_tools: null,
-      },
-      {
-        name: "Senior Coder",
-        role: "coder",
-        category: "Development",
-        system_prompt: promptByKey("senior_coder"),
-        model: "claude-opus-4-7",
+        system_prompt: promptByKey("drupal_coder"),
+        model: "claude-sonnet-4-6",
         allowed_tools: null,
       },
       {
@@ -169,14 +161,29 @@ function genericTeamTemplate(): WorkflowPreset {
         model: null,
         allowed_tools: null,
       },
-      // Closer agent removed (see comment in phpTeamTemplate).
     ],
     phases: [
-      { id: "junior", agent_name: "Junior Coder", next: "senior", position: { x: 240, y: 240 } },
-      { id: "senior", agent_name: "Senior Coder", next: "reviewer", position: { x: 420, y: 240 } },
-      { id: "reviewer", agent_name: "Reviewer", next: "tester", retry_target: "senior", max_attempts: 2, position: { x: 600, y: 240 } },
-      { id: "tester", agent_name: "Tester", next: null, retry_target: "senior", max_attempts: 2, position: { x: 780, y: 240 } },
+      { id: "drupal", agent_name: "Drupal Coder", next: "reviewer", position: { x: 240, y: 240 } },
+      { id: "reviewer", agent_name: "Reviewer", next: "ci_gate", retry_target: "drupal", max_attempts: 2, position: { x: 420, y: 240 } },
+      {
+        id: "ci_gate",
+        kind: "task",
+        task: {
+          type: "shell",
+          config: {
+            command: "if [ -f Makefile ] && grep -qE '^ci:' Makefile; then make ci; elif [ -f composer.json ]; then composer install --no-interaction --prefer-dist && (vendor/bin/phpunit || composer test) && (vendor/bin/phpcs --standard=Drupal,DrupalPractice web/modules/custom || true); else echo 'no CI configured'; fi",
+            timeout_sec: 900,
+          },
+        },
+        next: "tester",
+        retry_target: "drupal",
+        max_attempts: 2,
+        position: { x: 600, y: 240 },
+      },
+      { id: "tester", agent_name: "Tester", next: null, retry_target: "drupal", max_attempts: 2, position: { x: 780, y: 240 } },
     ],
+    project_specifics:
+      "Drupal project. Custom code in web/modules/custom/. PSR-12 + Drupal coding standards. declare(strict_types=1) at the top of every PHP file. Services with DI rather than \\Drupal::service() in hooks. Configuration management via drush cex; never edit core or contrib (patches go in composer.json).",
   };
 }
 
@@ -184,14 +191,14 @@ function soloDevTemplate(): WorkflowPreset {
   return {
     key: "solo-dev",
     name: "Solo dev (minimal)",
-    description: "Single Coder + Tester. For small tickets where retry/review overhead doesn't pay off.",
+    description: "Single PHP Coder + Tester. For small tickets where retry/review overhead doesn't pay off.",
     source: "builtin",
     agents: [
       {
         name: "Coder",
         role: "coder",
         category: "Development",
-        system_prompt: promptByKey("junior_coder"),
+        system_prompt: promptByKey("php_junior"),
         model: "claude-sonnet-4-6",
         allowed_tools: null,
       },
@@ -213,7 +220,7 @@ function soloDevTemplate(): WorkflowPreset {
 
 const BUILTIN: () => WorkflowPreset[] = () => [
   phpTeamTemplate(),
-  genericTeamTemplate(),
+  drupalTeamTemplate(),
   soloDevTemplate(),
 ];
 
