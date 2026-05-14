@@ -310,10 +310,13 @@ const DEFAULT_MAX_ITERATIONS = 25;
 const DEFAULT_BUDGET_USD = 20;
 const DIRECTOR_MODEL = "claude-sonnet-4-6";
 const SUBAGENT_BLACKLIST = new Set(["CTO", "Memory Curator", "Director"]);
-/** Hard cap on dispatches of any single sub-agent in one Director run. The
- *  prompt asks for ≤4; this enforces it in code so a hallucinating Director
- *  cannot loop forever on the same agent. */
-const MAX_DISPATCHES_PER_SUBAGENT = 4;
+/** Hard cap on dispatches of any single sub-agent in one Director run.
+ *  Raised from 4→6 after a PHPStan-heavy ticket (AGA-63) was abandoned with
+ *  131 errors remaining and concrete fixes diagnosed but uncommitted because
+ *  Senior had used all 4 turns. Large refactors / strict-mode upgrades often
+ *  need 5-6 rounds of "fix, run CI, fix remaining, run CI" before convergence;
+ *  4 was too tight. Budget cap ($20 default) is the real cost backstop. */
+const MAX_DISPATCHES_PER_SUBAGENT = 6;
 
 // ---- Main entry -------------------------------------------------------------
 
@@ -567,9 +570,52 @@ function enforceGuardrails(
       const ciFailures = history.filter(
         (t) => t.outcome.kind === "ci_gate" && t.outcome.ok === false,
       ).length;
-      if (juniorDispatches >= 3 && ciFailures >= 1) {
+      if (juniorDispatches >= 4 && ciFailures >= 1) {
         return {
           reason: `"${targetName}" already dispatched ${juniorDispatches}× and ci_gate has failed ${ciFailures}× — Junior had its shot at fixing CI. Escalate to a Senior-role coder (deeper expertise) or give_up with a concrete blocker. Don't re-dispatch Junior on the same failure.`,
+        };
+      }
+    }
+  }
+  // 1a.5) "CI after every coder" — when the last coder turn added commits and
+  //       no ci_gate has run since, force CI before dispatching anyone else.
+  //       The user's rule: Director never hands work from one coder to the
+  //       next (or to a reviewer) without first knowing the code compiles +
+  //       lints. Otherwise Junior writes broken PHPStan, Senior reads broken
+  //       PHPStan, neither knows what's actually wrong, both burn budget.
+  //       Allowed without CI: run_ci_gate, run_playbook_phase of any task
+  //       (including ci_gate / git_push), fetch_context, request_human_review,
+  //       give_up, mark_done (those have their own guardrails).
+  if (action.action === "dispatch" || action.action === "dispatch_parallel") {
+    // Find the most recent coder turn and the most recent ci_gate, compare iterations.
+    let lastCoderTurn: TurnRecord | null = null;
+    let lastCiTurn: TurnRecord | null = null;
+    for (const turn of history) {
+      if (turn.outcome.kind === "subagent" && turn.outcome.commits_added > 0) {
+        const subName = turn.outcome.subagent;
+        const agent = project.agents.find((a) => a.name === subName);
+        if (agent?.role === "coder") {
+          if (!lastCoderTurn || turn.iteration > lastCoderTurn.iteration) lastCoderTurn = turn;
+        }
+      }
+      if (turn.outcome.kind === "ci_gate") {
+        if (!lastCiTurn || turn.iteration > lastCiTurn.iteration) lastCiTurn = turn;
+      }
+    }
+    const ciStale = lastCoderTurn && (!lastCiTurn || lastCiTurn.iteration < lastCoderTurn.iteration);
+    if (ciStale && lastCoderTurn) {
+      // Only block if this dispatch involves a DIFFERENT agent than the last
+      // coder (re-dispatching the same coder to keep fixing is fine — same
+      // person, same context, no handoff yet).
+      const lastCoderName = lastCoderTurn.outcome.kind === "subagent" ? lastCoderTurn.outcome.subagent : null;
+      const targets = action.action === "dispatch" ? [action.subagent] : action.targets.map((t) => t.subagent);
+      const isHandoff = targets.some((n) => n !== lastCoderName);
+      const hasCiGate = project.workflow.phases.some(
+        (p) => p.kind === "task" && (p.task as any)?.type === "shell",
+      );
+      if (isHandoff && hasCiGate) {
+        return {
+          reason: `CI gate is stale: "${lastCoderName}" added commits on turn ${lastCoderTurn.iteration} and ci_gate hasn't run since. Run \`run_ci_gate\` (or \`run_playbook_phase ci_gate\`) BEFORE handing off to ${targets.length === 1 ? `"${targets[0]}"` : "another agent"} — every coder's work must pass CI before review/escalation/finalization.`,
         };
       }
     }
@@ -970,7 +1016,9 @@ The mental model: **Junior writes AND fixes most things**. Senior steps in only 
 
 4. **After Senior delivers a fix, dispatch Junior to apply remaining polish**, not Senior again. Senior touched the hard part; Junior can run the final ci_gate + fix any leftover lint without another expensive Senior turn.
 
-5. **Same-skill cap**: each sub-agent ≤ 4 dispatches per run (code-enforced). After 3 cycles with no progress → \`request_decompose\` or \`give_up\`.
+5. **Same-skill cap**: each sub-agent ≤ 6 dispatches per run (code-enforced). After 4-5 cycles with no progress → \`request_decompose\` or \`give_up\`.
+
+5a. **Run ci_gate after EVERY coder turn before handing off.** When a coder (Junior or Senior) commits code, the next action must be \`run_ci_gate\` (or \`run_playbook_phase ci_gate\`) — NOT another coder, NOT a Reviewer, NOT mark_done. Why: passing broken / failing-PHPStan code to the next agent wastes a turn on noisy diagnostics. Code-enforced: dispatching a DIFFERENT agent after a coder added commits is blocked until ci_gate runs. Re-dispatching the SAME coder to continue fixing is allowed without an interim CI (it's still the same person on the same context). Pattern: Junior → ci_gate → (green? Reviewer / Senior / mark_done) (red? Junior again with the failure tail).
 
 6. **Reflect every turn.** When you're about to dispatch Senior, ask: "Could Junior fix this with the failure notes as a hint?" If yes, dispatch Junior. Cheap iterations beat expensive one-shots.
 
